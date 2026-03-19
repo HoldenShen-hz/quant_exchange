@@ -18,9 +18,17 @@ from quant_exchange.core.models import (
     OrderSide,
     OrderType,
     PortfolioSnapshot,
+    RiskDecision,
     RiskLimits,
 )
 from quant_exchange.risk import RiskEngine
+from quant_exchange.risk.service import (
+    InstrumentRiskFilter,
+    InstrumentRiskState,
+    RiskAuditLogger,
+    RiskAuditEntry,
+    RiskReasonCode,
+)
 
 
 def utc_now() -> datetime:
@@ -284,6 +292,192 @@ class KillSwitchAlertTests(unittest.TestCase):
         alert_codes = [a.code for a in self.engine.alerts]
         self.assertIn("kill_switch_activated", alert_codes)
         self.assertIn("kill_switch_released", alert_codes)
+
+
+class InstrumentRiskFilterTests(unittest.TestCase):
+    """Test RK-03: Instrument-level risk filtering."""
+
+    def setUp(self) -> None:
+        self.filter = InstrumentRiskFilter(
+            max_volatility=0.30,
+            min_volume=1000.0,
+            min_liquidity_score=0.15,
+        )
+
+    def test_update_instrument_data(self) -> None:
+        """Verify instrument data is updated correctly."""
+        state = self.filter.update_instrument_data(
+            instrument_id="BTCUSDT",
+            current_price=50000.0,
+            previous_price=49500.0,
+            volume=50000.0,
+            high=50500.0,
+            low=49000.0,
+        )
+
+        self.assertIsInstance(state, InstrumentRiskState)
+        self.assertEqual(state.instrument_id, "BTCUSDT")
+        self.assertTrue(state.current_volatility > 0)
+        self.assertTrue(state.is_tradeable)
+
+    def test_volatility_filter_blocks_high_volatility(self) -> None:
+        """Verify high volatility instrument is blocked."""
+        # 60% volatility should be blocked (exceeds 30% max)
+        state = self.filter.update_instrument_data(
+            instrument_id="DOGEUSDT",
+            current_price=0.10,
+            previous_price=0.06,
+            volume=100000.0,
+        )
+
+        self.assertFalse(state.is_tradeable)
+        self.assertIn("volatility", state.block_reason.lower())
+
+    def test_volume_filter_blocks_low_volume(self) -> None:
+        """Verify low volume instrument is blocked."""
+        # Create filter with higher min volume
+        filter_high_min = InstrumentRiskFilter(min_volume=100000.0)
+
+        state = filter_high_min.update_instrument_data(
+            instrument_id="SHIBUSDT",
+            current_price=0.00001,
+            previous_price=0.0000098,
+            volume=100.0,  # Very low volume
+        )
+
+        self.assertFalse(state.is_tradeable)
+        self.assertIn("volume", state.block_reason.lower())
+
+    def test_check_instrument_tradeable(self) -> None:
+        """Verify tradeable check works correctly."""
+        self.filter.update_instrument_data(
+            instrument_id="ETHUSDT",
+            current_price=3000.0,
+            previous_price=2950.0,
+            volume=50000.0,
+        )
+
+        is_tradeable, reason = self.filter.check_instrument_tradeable("ETHUSDT")
+        self.assertTrue(is_tradeable)
+
+    def test_get_all_blocked_instruments(self) -> None:
+        """Verify blocked instruments list is correct."""
+        # Add a blocked instrument
+        filter_high_min = InstrumentRiskFilter(min_volume=100000.0)
+        filter_high_min.update_instrument_data(
+            instrument_id="SHIBUSDT",
+            current_price=0.00001,
+            previous_price=0.0000098,
+            volume=100.0,
+        )
+
+        blocked = filter_high_min.get_all_blocked_instruments()
+        self.assertTrue(len(blocked) >= 1)
+        self.assertTrue(any("SHIBUSDT" in item[0] for item in blocked))
+
+
+class RiskAuditLoggerTests(unittest.TestCase):
+    """Test RK-07: Enhanced risk audit trail with reason codes."""
+
+    def setUp(self) -> None:
+        self.logger = RiskAuditLogger()
+
+    def test_log_evaluation(self) -> None:
+        """Verify evaluation is logged correctly."""
+        from quant_exchange.core.models import RiskDecision
+
+        request = OrderRequest(
+            client_order_id="test_123",
+            instrument_id="BTCUSDT",
+            side=OrderSide.BUY,
+            quantity=1.0,
+            price=50000.0,
+            strategy_id="test_strategy",
+        )
+
+        snapshot = PortfolioSnapshot(
+            timestamp=utc_now(),
+            cash=100000.0,
+            positions_value=0.0,
+            equity=100000.0,
+            gross_exposure=0.0,
+            net_exposure=0.0,
+            leverage=1.0,
+            drawdown=0.0,
+        )
+
+        decision = RiskDecision(approved=False, reasons=("kill_switch_active",))
+        entry = self.logger.log_evaluation(decision, request, 50000.0, snapshot)
+
+        self.assertIsInstance(entry, RiskAuditEntry)
+        self.assertEqual(entry.decision, "rejected")
+        self.assertEqual(entry.primary_reason_code, RiskReasonCode.S_KILL_SWITCH)
+
+    def test_get_rejection_summary(self) -> None:
+        """Verify rejection summary is computed correctly."""
+        from quant_exchange.core.models import RiskDecision
+
+        request = OrderRequest(
+            client_order_id="test_456",
+            instrument_id="ETHUSDT",
+            side=OrderSide.BUY,
+            quantity=1.0,
+            price=3000.0,
+            strategy_id="test_strategy",
+        )
+
+        snapshot = PortfolioSnapshot(
+            timestamp=utc_now(),
+            cash=100000.0,
+            positions_value=0.0,
+            equity=100000.0,
+            gross_exposure=0.0,
+            net_exposure=0.0,
+            leverage=1.0,
+            drawdown=0.0,
+        )
+
+        # Log a rejection
+        decision = RiskDecision(approved=False, reasons=("leverage_limit",))
+        self.logger.log_evaluation(decision, request, 3000.0, snapshot)
+
+        summary = self.logger.get_rejection_summary()
+
+        self.assertEqual(summary.total_evaluations, 1)
+        self.assertEqual(summary.total_rejections, 1)
+        self.assertIn(RiskReasonCode.A_LEVERAGE_EXCEEDED, summary.rejections_by_code)
+
+    def test_export_audit_csv(self) -> None:
+        """Verify CSV export works."""
+        from quant_exchange.core.models import RiskDecision
+
+        request = OrderRequest(
+            client_order_id="test_csv",
+            instrument_id="BTCUSDT",
+            side=OrderSide.BUY,
+            quantity=1.0,
+            price=50000.0,
+            strategy_id="test",
+        )
+
+        snapshot = PortfolioSnapshot(
+            timestamp=utc_now(),
+            cash=100000.0,
+            positions_value=0.0,
+            equity=100000.0,
+            gross_exposure=0.0,
+            net_exposure=0.0,
+            leverage=1.0,
+            drawdown=0.0,
+        )
+
+        decision = RiskDecision(approved=False, reasons=("market_interrupted",))
+        self.logger.log_evaluation(decision, request, 50000.0, snapshot)
+
+        csv_output = self.logger.export_audit_csv()
+        self.assertIn("entry_id", csv_output)
+        self.assertIn("BTCUSDT", csv_output)
+        self.assertIn(RiskReasonCode.S_MARKET_INTERRUPTED, csv_output)
 
 
 if __name__ == "__main__":

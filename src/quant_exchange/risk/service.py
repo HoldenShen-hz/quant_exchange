@@ -454,3 +454,481 @@ class RiskEngine:
     def margin_warning_states(self) -> dict[str, MarginWarningState]:
         """Return margin warning states for all instruments."""
         return dict(self._margin_states)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RK-03: Instrument-Level Risk Controls (Liquidity & Volatility Filtering)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class InstrumentRiskState:
+    """Risk state for an individual instrument."""
+
+    instrument_id: str
+    current_volatility: float = 0.0
+    average_volatility: float = 0.0
+    volatility_rank: float = 0.0  # percentile rank
+    average_daily_volume: float = 0.0
+    current_volume: float = 0.0
+    volume_rank: float = 0.0  # percentile rank
+    liquidity_score: float = 1.0  # 0-1, computed from volume and spread
+    is_tradeable: bool = True
+    block_reason: str = ""
+    last_updated: datetime | None = None
+
+
+class InstrumentRiskFilter:
+    """RK-03: Instrument-level risk filtering based on liquidity and volatility.
+
+    Provides:
+    - Volatility-based trading restrictions
+    - Liquidity-based order sizing limits
+    - Per-instrument risk state tracking
+    """
+
+    def __init__(
+        self,
+        max_volatility: float = 0.50,
+        min_volume: float = 10000.0,
+        min_liquidity_score: float = 0.1,
+    ) -> None:
+        self.max_volatility = max_volatility
+        self.min_volume = min_volume
+        self.min_liquidity_score = min_liquidity_score
+        self._instrument_states: dict[str, InstrumentRiskState] = {}
+        self._volume_history: dict[str, list[float]] = defaultdict(list)
+        self._volatility_history: dict[str, list[float]] = defaultdict(list)
+
+    def update_instrument_data(
+        self,
+        instrument_id: str,
+        current_price: float,
+        previous_price: float,
+        volume: float,
+        high: float | None = None,
+        low: float | None = None,
+    ) -> InstrumentRiskState:
+        """Update risk state for an instrument based on latest market data."""
+        state = self._instrument_states.get(instrument_id)
+        if state is None:
+            state = InstrumentRiskState(instrument_id=instrument_id)
+            self._instrument_states[instrument_id] = state
+
+        # Calculate volatility (simplified: daily range / price)
+        if high is not None and low is not None and current_price > 0:
+            state.current_volatility = (high - low) / current_price
+        elif previous_price > 0:
+            state.current_volatility = abs(current_price - previous_price) / previous_price
+
+        # Update volatility history (keep 20 periods)
+        self._volatility_history[instrument_id].append(state.current_volatility)
+        if len(self._volatility_history[instrument_id]) > 20:
+            self._volatility_history[instrument_id] = self._volatility_history[instrument_id][-20:]
+
+        # Calculate average volatility
+        if self._volatility_history[instrument_id]:
+            state.average_volatility = sum(self._volatility_history[instrument_id]) / len(self._volatility_history[instrument_id])
+
+        # Calculate volatility rank (percentile)
+        if len(self._volatility_history[instrument_id]) >= 5:
+            sorted_vols = sorted(self._volatility_history[instrument_id])
+            rank_idx = bisect_left(sorted_vols, state.current_volatility)
+            state.volatility_rank = rank_idx / len(sorted_vols)
+
+        # Update volume history (keep 20 periods)
+        self._volume_history[instrument_id].append(volume)
+        if len(self._volume_history[instrument_id]) > 20:
+            self._volume_history[instrument_id] = self._volume_history[instrument_id][-20:]
+
+        # Calculate volume rank
+        if len(self._volume_history[instrument_id]) >= 5:
+            sorted_volumes = sorted(self._volume_history[instrument_id])
+            rank_idx = bisect_left(sorted_volumes, volume)
+            state.volume_rank = rank_idx / len(sorted_volumes)
+
+        # Calculate average daily volume
+        if self._volume_history[instrument_id]:
+            state.average_daily_volume = sum(self._volume_history[instrument_id]) / len(self._volume_history[instrument_id])
+
+        state.current_volume = volume
+
+        # Compute liquidity score (0-1, higher is better)
+        vol_score = max(0.0, 1.0 - state.volatility_rank)  # Lower volatility = higher score
+        volume_score = state.volume_rank  # Higher volume = higher score
+        state.liquidity_score = 0.6 * volume_score + 0.4 * vol_score
+
+        # Determine if instrument is tradeable
+        state.is_tradeable = True
+        state.block_reason = ""
+
+        if state.current_volatility > self.max_volatility:
+            state.is_tradeable = False
+            state.block_reason = f"volatility_exceeded:{state.current_volatility:.2%}>{self.max_volatility:.2%}"
+
+        if volume < self.min_volume:
+            state.is_tradeable = False
+            state.block_reason = f"volume_below_min:{volume:.0f}<{self.min_volume:.0f}"
+
+        if state.liquidity_score < self.min_liquidity_score:
+            state.is_tradeable = False
+            state.block_reason = f"liquidity_score_low:{state.liquidity_score:.2f}<{self.min_liquidity_score:.2f}"
+
+        state.last_updated = utc_now()
+        return state
+
+    def check_instrument_tradeable(
+        self,
+        instrument_id: str,
+        order_notional: float | None = None,
+    ) -> tuple[bool, str]:
+        """Check if an instrument can be traded.
+
+        Returns (is_tradeable, reason).
+        """
+        state = self._instrument_states.get(instrument_id)
+        if state is None:
+            return (True, "")  # Unknown instruments are allowed
+
+        if not state.is_tradeable:
+            return (False, state.block_reason)
+
+        # Additional check: order notional vs liquidity
+        if order_notional is not None and state.current_volume > 0:
+            max_order_pct = 0.05  # Max 5% of daily volume per order
+            if order_notional / state.average_daily_volume > max_order_pct:
+                return (False, f"order_size_exceeds_liquidity:{order_notional/state.average_daily_volume:.1%}>5%")
+
+        return (True, "")
+
+    def get_instrument_state(self, instrument_id: str) -> InstrumentRiskState | None:
+        """Get current risk state for an instrument."""
+        return self._instrument_states.get(instrument_id)
+
+    def get_all_blocked_instruments(self) -> list[tuple[str, str]]:
+        """Get list of all blocked instruments and reasons."""
+        return [
+            (iid, state.block_reason)
+            for iid, state in self._instrument_states.items()
+            if not state.is_tradeable
+        ]
+
+    def get_volatility_rank(self, instrument_id: str) -> float:
+        """Get the volatility rank for an instrument (0-1, higher = more volatile)."""
+        state = self._instrument_states.get(instrument_id)
+        return state.volatility_rank if state else 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RK-07: Enhanced Risk Audit Trail with Reason Codes
+# ─────────────────────────────────────────────────────────────────────────────
+
+class RiskReasonCode:
+    """Standardized reason codes for risk rejections (RK-07)."""
+
+    # System-level codes (S*)
+    S_KILL_SWITCH = "S001"  # Kill switch active
+    S_DATA_STALE = "S002"  # Market data stale
+    S_MARKET_INTERRUPTED = "S003"  # Market interrupted
+    S_SYSTEM_OVERLOAD = "S004"  # System overload
+
+    # Order-level codes (O*)
+    O_QUANTITY_INVALID = "O001"  # Quantity <= 0
+    O_QUANTITY_EXCEEDED = "O002"  # Single order qty limit
+    O_NOTIONAL_EXCEEDED = "O003"  # Order notional limit
+    O_PRICE_DEVIATION = "O004"  # Price deviation too large
+    O_FREQUENCY_LIMIT = "O005"  # Order frequency exceeded
+    O_DUPLICATE_SIGNAL = "O006"  # Duplicate signal detected
+    O_SPREAD_TOO_WIDE = "O007"  # Bid-ask spread too wide
+
+    # Position-level codes (P*)
+    P_NOTIONAL_EXCEEDED = "P001"  # Position notional limit
+    P_CONCENTRATION_HIGH = "P002"  # Position concentration too high
+
+    # Strategy-level codes (T*) - T for trading/strategy
+    T_DAILY_LOSS_LIMIT = "T001"  # Strategy daily loss limit
+    T_CONSECUTIVE_LOSSES = "T002"  # Consecutive losses limit
+    T_STRATEGY_DISABLED = "T003"  # Strategy disabled
+
+    # Account-level codes (A*)
+    A_GROSS_NOTIONAL = "A001"  # Gross notional limit
+    A_LEVERAGE_EXCEEDED = "A002"  # Leverage limit
+    A_DRAWDOWN_EXCEEDED = "A003"  # Drawdown limit
+    A_MARGIN_WARNING = "A004"  # Margin warning
+    A_MARGIN_CRITICAL = "A005"  # Margin critical
+
+    # Instrument-level codes (I*) - RK-03
+    I_VOLATILITY_HIGH = "I001"  # Volatility too high
+    I_VOLUME_LOW = "I002"  # Volume too low
+    I_LIQUIDITY_LOW = "I003"  # Liquidity score too low
+    I_ORDER_SIZE_LARGE = "I004"  # Order size exceeds liquidity
+
+    # Black swan codes (B*)
+    B_BLACK_SWAN_EVENT = "B001"  # Black swan event detected
+    B_CORRELATION_SPIKE = "B002"  # Correlation spike
+    B_VIX_SPIKE = "B003"  # VIX above threshold
+
+
+@dataclass
+class RiskAuditEntry:
+    """Enhanced audit trail entry with standardized reason codes (RK-07)."""
+
+    entry_id: str
+    timestamp: datetime
+    client_order_id: str
+    instrument_id: str
+    strategy_id: str
+    decision: str  # "approved" or "rejected"
+    primary_reason_code: str
+    all_reason_codes: tuple[str, ...]
+    reason_descriptions: tuple[str, ...]
+    notional: float
+    quantity: float
+    price: float
+    margin_ratio: float | None
+    snapshot_equity: float
+    snapshot_leverage: float
+    evaluation_time_ms: float
+    risk_level: str  # "system", "order", "position", "strategy", "account", "instrument"
+
+
+@dataclass
+class RiskAuditSummary:
+    """Summary statistics for risk audit (RK-07)."""
+
+    total_evaluations: int
+    total_rejections: int
+    rejection_rate: float
+    rejections_by_code: dict[str, int]
+    rejections_by_level: dict[str, int]
+    average_evaluation_time_ms: float
+    period_start: datetime
+    period_end: datetime
+
+
+class RiskAuditLogger:
+    """RK-07: Enhanced risk audit trail with standardized reason codes.
+
+    Provides:
+    - Standardized reason code classification
+    - Detailed audit entries
+    - Rejection analysis and reporting
+    - Compliance-friendly audit format
+    """
+
+    REASON_CODE_MAP: dict[str, tuple[str, str]] = {
+        # System-level
+        "kill_switch_active": (RiskReasonCode.S_KILL_SWITCH, "Kill switch is active"),
+        "market_data_stale": (RiskReasonCode.S_DATA_STALE, "Market data is stale"),
+        "market_interrupted": (RiskReasonCode.S_MARKET_INTERRUPTED, "Market is interrupted"),
+        # Order-level
+        "quantity_must_be_positive": (RiskReasonCode.O_QUANTITY_INVALID, "Order quantity must be positive"),
+        "single_order_quantity_limit": (RiskReasonCode.O_QUANTITY_EXCEEDED, "Single order quantity exceeds limit"),
+        "order_notional_limit": (RiskReasonCode.O_NOTIONAL_EXCEEDED, "Order notional exceeds limit"),
+        "price_deviation_limit": (RiskReasonCode.O_PRICE_DEVIATION, "Price deviation exceeds limit"),
+        "order_frequency_limit": (RiskReasonCode.O_FREQUENCY_LIMIT, "Order frequency limit exceeded"),
+        "duplicate_signal_limit": (RiskReasonCode.O_DUPLICATE_SIGNAL, "Duplicate signal limit exceeded"),
+        # Position-level
+        "position_notional_limit": (RiskReasonCode.P_NOTIONAL_EXCEEDED, "Position notional exceeds limit"),
+        # Strategy-level
+        "strategy_daily_loss_limit": (RiskReasonCode.T_DAILY_LOSS_LIMIT, "Strategy daily loss limit exceeded"),
+        "strategy_consecutive_losses_limit": (RiskReasonCode.T_CONSECUTIVE_LOSSES, "Strategy consecutive losses limit"),
+        # Account-level
+        "gross_notional_limit": (RiskReasonCode.A_GROSS_NOTIONAL, "Gross notional exceeds limit"),
+        "leverage_limit": (RiskReasonCode.A_LEVERAGE_EXCEEDED, "Leverage exceeds limit"),
+        "drawdown_limit": (RiskReasonCode.A_DRAWDOWN_EXCEEDED, "Drawdown exceeds limit"),
+        "margin_warning": (RiskReasonCode.A_MARGIN_WARNING, "Margin ratio at warning level"),
+        "margin_critical": (RiskReasonCode.A_MARGIN_CRITICAL, "Margin ratio at critical level"),
+        # Instrument-level (RK-03)
+        "volatility_exceeded": (RiskReasonCode.I_VOLATILITY_HIGH, "Instrument volatility exceeds threshold"),
+        "volume_below_min": (RiskReasonCode.I_VOLUME_LOW, "Instrument volume below minimum"),
+        "liquidity_score_low": (RiskReasonCode.I_LIQUIDITY_LOW, "Instrument liquidity score too low"),
+        "order_size_exceeds_liquidity": (RiskReasonCode.I_ORDER_SIZE_LARGE, "Order size exceeds liquidity"),
+    }
+
+    def __init__(self) -> None:
+        self._entries: list[RiskAuditEntry] = []
+        self._max_entries = 10000
+
+    def _get_reason_code(self, reason: str) -> tuple[str, str]:
+        """Get standardized reason code and description for a reason string."""
+        for key, (code, desc) in self.REASON_CODE_MAP.items():
+            if key in reason:
+                return (code, desc)
+        # Default code for unknown reasons
+        return ("X999", f"Unknown reason: {reason}")
+
+    def _classify_level(self, reason: str) -> str:
+        """Classify the risk level of a rejection."""
+        if reason.startswith("S"):
+            return "system"
+        elif reason.startswith("O"):
+            return "order"
+        elif reason.startswith("P"):
+            return "position"
+        elif reason.startswith("T"):
+            return "strategy"
+        elif reason.startswith("A"):
+            return "account"
+        elif reason.startswith("I"):
+            return "instrument"
+        elif reason.startswith("B"):
+            return "blackswan"
+        return "unknown"
+
+    def log_evaluation(
+        self,
+        decision: "RiskDecision",
+        request: "OrderRequest",
+        price: float,
+        snapshot: "PortfolioSnapshot",
+        margin_ratio: float | None = None,
+        evaluation_time_ms: float = 0.0,
+    ) -> RiskAuditEntry:
+        """Log a risk evaluation decision."""
+        import uuid
+
+        reason_codes = []
+        reason_descriptions = []
+        for reason in decision.reasons:
+            code, desc = self._get_reason_code(reason)
+            reason_codes.append(code)
+            reason_descriptions.append(desc)
+
+        primary_code = reason_codes[0] if reason_codes else ""
+        primary_level = self._classify_level(primary_code) if primary_code else "unknown"
+
+        entry = RiskAuditEntry(
+            entry_id=f"raudit:{uuid.uuid4().hex[:12]}",
+            timestamp=utc_now(),
+            client_order_id=request.client_order_id,
+            instrument_id=request.instrument_id,
+            strategy_id=request.strategy_id,
+            decision="approved" if decision.approved else "rejected",
+            primary_reason_code=primary_code,
+            all_reason_codes=tuple(reason_codes),
+            reason_descriptions=tuple(reason_descriptions),
+            notional=abs(request.quantity * price),
+            quantity=request.quantity,
+            price=price,
+            margin_ratio=margin_ratio,
+            snapshot_equity=snapshot.equity,
+            snapshot_leverage=snapshot.leverage,
+            evaluation_time_ms=evaluation_time_ms,
+            risk_level=primary_level,
+        )
+
+        self._entries.append(entry)
+        if len(self._entries) > self._max_entries:
+            self._entries = self._entries[-self._max_entries:]
+
+        return entry
+
+    def get_audit_entries(
+        self,
+        strategy_id: str | None = None,
+        instrument_id: str | None = None,
+        limit: int = 100,
+    ) -> list[RiskAuditEntry]:
+        """Get audit entries with optional filtering."""
+        entries = self._entries
+
+        if strategy_id:
+            entries = [e for e in entries if e.strategy_id == strategy_id]
+        if instrument_id:
+            entries = [e for e in entries if e.instrument_id == instrument_id]
+
+        return entries[-limit:]
+
+    def get_rejection_summary(
+        self,
+        period_start: datetime | None = None,
+        period_end: datetime | None = None,
+    ) -> RiskAuditSummary:
+        """Get summary statistics of rejections for a period."""
+        entries = self._entries
+
+        if period_start:
+            entries = [e for e in entries if e.timestamp >= period_start]
+        if period_end:
+            entries = [e for e in entries if e.timestamp <= period_end]
+
+        rejected = [e for e in entries if e.decision == "rejected"]
+        rejections_by_code: dict[str, int] = defaultdict(int)
+        rejections_by_level: dict[str, int] = defaultdict(int)
+
+        for entry in rejected:
+            for code in entry.all_reason_codes:
+                rejections_by_code[code] += 1
+            rejections_by_level[entry.risk_level] += 1
+
+        avg_eval_time = (
+            sum(e.evaluation_time_ms for e in entries) / len(entries)
+            if entries else 0.0
+        )
+
+        return RiskAuditSummary(
+            total_evaluations=len(entries),
+            total_rejections=len(rejected),
+            rejection_rate=len(rejected) / len(entries) if entries else 0.0,
+            rejections_by_code=dict(rejections_by_code),
+            rejections_by_level=dict(rejections_by_level),
+            average_evaluation_time_ms=avg_eval_time,
+            period_start=period_start or (entries[0].timestamp if entries else utc_now()),
+            period_end=period_end or (entries[-1].timestamp if entries else utc_now()),
+        )
+
+    def get_top_rejection_reasons(self, n: int = 10) -> list[tuple[str, int]]:
+        """Get the top N rejection reasons by frequency."""
+        summary = self.get_rejection_summary()
+        sorted_reasons = sorted(
+            summary.rejections_by_code.items(),
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        return sorted_reasons[:n]
+
+    def export_audit_csv(self, limit: int | None = None) -> str:
+        """Export audit entries as CSV for compliance reporting."""
+        import csv
+        import io
+
+        entries = self._entries[-limit:] if limit else self._entries
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        # Header
+        writer.writerow([
+            "entry_id", "timestamp", "client_order_id", "instrument_id", "strategy_id",
+            "decision", "primary_reason_code", "all_reason_codes", "reason_descriptions",
+            "notional", "quantity", "price", "margin_ratio", "snapshot_equity",
+            "snapshot_leverage", "evaluation_time_ms", "risk_level",
+        ])
+
+        # Data
+        for entry in entries:
+            writer.writerow([
+                entry.entry_id,
+                entry.timestamp.isoformat(),
+                entry.client_order_id,
+                entry.instrument_id,
+                entry.strategy_id,
+                entry.decision,
+                entry.primary_reason_code,
+                "|".join(entry.all_reason_codes),
+                "|".join(entry.reason_descriptions),
+                entry.notional,
+                entry.quantity,
+                entry.price,
+                entry.margin_ratio,
+                entry.snapshot_equity,
+                entry.snapshot_leverage,
+                entry.evaluation_time_ms,
+                entry.risk_level,
+            ])
+
+        return output.getvalue()
+
+
+# Import bisect_left for volatility rank calculation
+from bisect import bisect_left

@@ -92,6 +92,18 @@ from quant_exchange.enhanced.portfolio_allocators import (
     RebalanceTrigger,
     RebalancePlan,
     RiskBudget,
+    # PF-04
+    RiskExposureAggregator,
+    AggregatedExposure,
+    StrategyExposure,
+    # PF-05
+    AttributionAnalyzer,
+    AttributionResult,
+    # PF-06
+    MultiAccountAllocator,
+    Account,
+    TransferRequest,
+    CapitalAllocationPlan,
 )
 
 
@@ -737,6 +749,510 @@ class TestPortfolioAllocatorService(unittest.TestCase):
         retrieved = self.allocator.get_allocator(created.config_id)
         self.assertIsNotNone(retrieved)
         self.assertEqual(retrieved.config_id, created.config_id)
+
+
+class TestRiskExposureAggregator(unittest.TestCase):
+    """Tests for PF-04: Inter-Strategy Risk Exposure Aggregation."""
+
+    def setUp(self):
+        self.aggregator = RiskExposureAggregator()
+
+    def test_aggregate_exposures(self):
+        self.aggregator.register_instrument_sector("AAPL", "Technology")
+        self.aggregator.register_instrument_sector("MSFT", "Technology")
+        self.aggregator.register_instrument_sector("JPM", "Financials")
+
+        self.aggregator.record_strategy_position(
+            "strategy1",
+            {"AAPL": 100, "MSFT": 50},
+            cash=10000.0,
+        )
+        self.aggregator.record_strategy_position(
+            "strategy2",
+            {"JPM": 200, "MSFT": 25},
+            cash=15000.0,
+        )
+
+        prices = {"AAPL": 150.0, "MSFT": 300.0, "JPM": 120.0}
+        result = self.aggregator.aggregate_exposures(prices)
+
+        self.assertIsInstance(result, AggregatedExposure)
+        self.assertEqual(result.total_gross_exposure, 100 * 150.0 + 50 * 300.0 + 200 * 120.0 + 25 * 300.0)
+        self.assertIn("strategy1", result.strategy_exposures)
+        self.assertIn("strategy2", result.strategy_exposures)
+
+    def test_strategy_risk_contribution(self):
+        self.aggregator.record_strategy_position("strat1", {"AAPL": 100}, cash=10000.0)
+        self.aggregator.record_strategy_position("strat2", {"MSFT": 50}, cash=10000.0)
+
+        prices = {"AAPL": 150.0, "MSFT": 300.0}
+        result = self.aggregator.aggregate_exposures(prices)
+
+        contributions = self.aggregator.get_strategy_risk_contribution(result)
+        self.assertIsInstance(contributions, dict)
+        self.assertEqual(len(contributions), 2)
+
+
+class TestAttributionAnalyzer(unittest.TestCase):
+    """Tests for PF-05: Return Attribution Analysis."""
+
+    def setUp(self):
+        self.analyzer = AttributionAnalyzer()
+
+    def test_brinson_attribution(self):
+        portfolio_weights = {"AAPL": 0.4, "MSFT": 0.3, "GOOGL": 0.3}
+        benchmark_weights = {"AAPL": 0.35, "MSFT": 0.35, "GOOGL": 0.3}
+        portfolio_returns = {"AAPL": 0.12, "MSFT": 0.08, "GOOGL": 0.10}
+        benchmark_returns = {"AAPL": 0.10, "MSFT": 0.09, "GOOGL": 0.08}
+
+        result = self.analyzer.brinson_attribution(
+            portfolio_weights, benchmark_weights,
+            portfolio_returns, benchmark_returns,
+        )
+
+        self.assertIsInstance(result, AttributionResult)
+        self.assertIsNotNone(result.allocation_effect)
+        self.assertIsNotNone(result.selection_effect)
+        self.assertIsNotNone(result.interaction_effect)
+
+    def test_nav_attribution(self):
+        positions = {"AAPL": 100, "MSFT": 50}
+        prices_start = {"AAPL": 145.0, "MSFT": 290.0}
+        prices_end = {"AAPL": 155.0, "MSFT": 310.0}
+        benchmark_return = 0.05
+
+        result = self.analyzer.calculate_nav_attribution(
+            positions, prices_start, prices_end, benchmark_return,
+        )
+
+        self.assertIsInstance(result, AttributionResult)
+        self.assertIn("AAPL", result.return_contributions)
+        self.assertIn("MSFT", result.return_contributions)
+
+    def test_top_contributors(self):
+        contributions = {"AAPL": 0.05, "MSFT": -0.02, "GOOGL": 0.03, "JPM": 0.01}
+        top, bottom = self.analyzer.get_top_contributors(contributions, n=2)
+
+        self.assertEqual(len(top), 2)
+        self.assertEqual(top[0][0], "AAPL")  # Highest contributor
+        # Bottom 2 are JPM (0.01) and MSFT (-0.02) - MSFT is the lowest
+        self.assertEqual(bottom[1][0], "MSFT")  # Lowest contributor
+
+
+class TestMultiAccountAllocator(unittest.TestCase):
+    """Tests for PF-06: Multi-Account Capital Allocation."""
+
+    def setUp(self):
+        self.allocator = MultiAccountAllocator()
+
+    def test_create_account(self):
+        account = self.allocator.create_account(
+            user_id="user1",
+            account_type="primary",
+            initial_cash=100000.0,
+        )
+        self.assertIsInstance(account, Account)
+        self.assertEqual(account.cash_balance, 100000.0)
+        self.assertEqual(account.account_type, "primary")
+
+    def test_transfer_funds(self):
+        acc1 = self.allocator.create_account("user1", initial_cash=100000.0)
+        acc2 = self.allocator.create_account("user1", initial_cash=50000.0)
+
+        transfer = self.allocator.transfer_funds(
+            acc1.account_id, acc2.account_id, 25000.0,
+        )
+
+        self.assertIsInstance(transfer, TransferRequest)
+        self.assertEqual(transfer.status, "completed")
+        self.assertEqual(self.allocator.get_account(acc1.account_id).cash_balance, 75000.0)
+        self.assertEqual(self.allocator.get_account(acc2.account_id).cash_balance, 75000.0)
+
+    def test_child_accounts(self):
+        parent = self.allocator.create_account("user1", "primary")
+        child1 = self.allocator.create_account("user1", "sub", parent_account_id=parent.account_id)
+        child2 = self.allocator.create_account("user1", "sub", parent_account_id=parent.account_id)
+
+        children = self.allocator.get_child_accounts(parent.account_id)
+        self.assertEqual(len(children), 2)
+
+    def test_allocation_plan(self):
+        acc1 = self.allocator.create_account("user1", initial_cash=100000.0)
+        acc2 = self.allocator.create_account("user1", initial_cash=100000.0)
+
+        plan = self.allocator.create_allocation_plan(
+            user_id="user1",
+            total_capital=200000.0,
+            account_weights={acc1.account_id: 0.6, acc2.account_id: 0.4},
+        )
+
+        self.assertIsInstance(plan, CapitalAllocationPlan)
+        self.assertEqual(plan.account_allocations[acc1.account_id], 120000.0)
+        self.assertEqual(plan.account_allocations[acc2.account_id], 80000.0)
+
+    def test_rebalance_needed(self):
+        acc1 = self.allocator.create_account("user1", initial_cash=100000.0)
+        acc2 = self.allocator.create_account("user1", initial_cash=100000.0)
+
+        plan = self.allocator.create_allocation_plan(
+            user_id="user1",
+            total_capital=200000.0,
+            account_weights={acc1.account_id: 0.5, acc2.account_id: 0.5},
+            rebalance_threshold=0.05,
+        )
+
+        # Acc1 grew to 120k, acc2 stayed at 100k - needs rebalance
+        current_capitals = {acc1.account_id: 120000.0, acc2.account_id: 100000.0}
+        needed, accounts = self.allocator.check_rebalance_needed(plan.plan_id, current_capitals)
+
+        self.assertTrue(needed)
+        self.assertIn(acc1.account_id, accounts)
+
+
+class TestWebhookService(unittest.TestCase):
+    """Tests for HOOK-01, HOOK-02, HOOK-03: Webhook management."""
+
+    def setUp(self):
+        from quant_exchange.enhanced.automation import WebhookService, WebhookDirection, WebhookMethod
+        self.webhook = WebhookService()
+        self.WebhookDirection = WebhookDirection
+        self.WebhookMethod = WebhookMethod
+
+    def test_register_endpoint(self):
+        endpoint = self.webhook.register_endpoint(
+            name="Test Endpoint",
+            url="https://example.com/webhook",
+            direction=self.WebhookDirection.OUTBOUND,
+            event_types=("order.filled", "position.closed"),
+        )
+        self.assertTrue(endpoint.endpoint_id.startswith("wh_"))
+        self.assertEqual(endpoint.name, "Test Endpoint")
+        self.assertEqual(len(endpoint.secret), 32)
+
+    def test_get_endpoint(self):
+        endpoint = self.webhook.register_endpoint(
+            name="Get Test",
+            url="https://example.com/get",
+            direction=self.WebhookDirection.OUTBOUND,
+        )
+        retrieved = self.webhook.get_endpoint(endpoint.endpoint_id)
+        self.assertIsNotNone(retrieved)
+        self.assertEqual(retrieved.name, "Get Test")
+
+    def test_generate_signature(self):
+        endpoint = self.webhook.register_endpoint(
+            name="Sig Test",
+            url="https://example.com/sig",
+            direction=self.WebhookDirection.OUTBOUND,
+        )
+        sig = self.webhook.generate_signature(endpoint.endpoint_id, "test payload")
+        self.assertTrue(sig.valid)
+        self.assertEqual(sig.algorithm, "sha256")
+
+    def test_validate_signature(self):
+        endpoint = self.webhook.register_endpoint(
+            name="Validate Test",
+            url="https://example.com/validate",
+            direction=self.WebhookDirection.INBOUND,
+        )
+        payload = "test payload"
+        sig = self.webhook.generate_signature(endpoint.endpoint_id, payload)
+        result = self.webhook.validate_signature(endpoint.endpoint_id, payload, sig.provided_signature)
+        self.assertTrue(result.valid)
+
+    def test_record_delivery(self):
+        endpoint = self.webhook.register_endpoint(
+            name="Delivery Test",
+            url="https://example.com/delivery",
+            direction=self.WebhookDirection.OUTBOUND,
+        )
+        delivery = self.webhook.record_delivery(
+            endpoint_id=endpoint.endpoint_id,
+            event_type="order.filled",
+            payload={"order_id": "123", "status": "filled"},
+        )
+        self.assertTrue(delivery.delivery_id.startswith("del_"))
+        self.assertEqual(delivery.status, "pending")
+
+    def test_list_endpoints(self):
+        self.webhook.register_endpoint("List 1", "https://example.com/1", self.WebhookDirection.OUTBOUND)
+        self.webhook.register_endpoint("List 2", "https://example.com/2", self.WebhookDirection.OUTBOUND)
+        self.webhook.register_endpoint("List 3", "https://example.com/3", self.WebhookDirection.INBOUND)
+
+        all_endpoints = self.webhook.list_endpoints()
+        self.assertEqual(len(all_endpoints), 3)
+
+        outbound_only = self.webhook.list_endpoints(direction=self.WebhookDirection.OUTBOUND)
+        self.assertEqual(len(outbound_only), 2)
+
+    def test_rotate_secret(self):
+        endpoint = self.webhook.register_endpoint(
+            name="Rotate Test",
+            url="https://example.com/rotate",
+            direction=self.WebhookDirection.OUTBOUND,
+        )
+        old_secret = endpoint.secret
+        new_secret = self.webhook.rotate_secret(endpoint.endpoint_id)
+        self.assertIsNotNone(new_secret)
+        self.assertNotEqual(new_secret, old_secret)
+
+
+class TestAutomationWorkflowService(unittest.TestCase):
+    """Tests for HOOK-04, HOOK-05: Workflow automation."""
+
+    def setUp(self):
+        from quant_exchange.enhanced.automation import (
+            AutomationWorkflowService, WorkflowTrigger, WorkflowAction,
+            WorkflowCondition, TriggerType,
+        )
+        self.workflow = AutomationWorkflowService()
+        self.WorkflowTrigger = WorkflowTrigger
+        self.WorkflowAction = WorkflowAction
+        self.WorkflowCondition = WorkflowCondition
+        self.TriggerType = TriggerType
+
+    def test_create_workflow(self):
+        trigger = self.WorkflowTrigger(trigger_type=self.TriggerType.MANUAL)
+        action = self.WorkflowAction(action_type="log", params={"message": "Test"})
+        workflow = self.workflow.create_workflow(
+            name="Test Workflow",
+            trigger=trigger,
+            actions=(action,),
+            description="A test workflow",
+        )
+        self.assertTrue(workflow.workflow_id.startswith("wf_"))
+        self.assertEqual(workflow.name, "Test Workflow")
+        self.assertEqual(workflow.version, 1)
+
+    def test_get_workflow(self):
+        trigger = self.WorkflowTrigger(trigger_type=self.TriggerType.MANUAL)
+        workflow = self.workflow.create_workflow(
+            name="Get Test",
+            trigger=trigger,
+            actions=(self.WorkflowAction(action_type="log", params={}),),
+        )
+        retrieved = self.workflow.get_workflow(workflow.workflow_id)
+        self.assertIsNotNone(retrieved)
+        self.assertEqual(retrieved.name, "Get Test")
+
+    def test_evaluate_trigger_conditions(self):
+        trigger = self.WorkflowTrigger(
+            trigger_type=self.TriggerType.EVENT,
+            conditions=(
+                self.WorkflowCondition(field="payload.price", operator="gt", value=100),
+            ),
+        )
+        workflow = self.workflow.create_workflow(
+            name="Condition Test",
+            trigger=trigger,
+            actions=(self.WorkflowAction(action_type="log", params={}),),
+        )
+
+        # Should pass - price is 150 > 100
+        result1 = self.workflow.evaluate_trigger(workflow, {"event_type": "test", "payload": {"price": 150}})
+        self.assertTrue(result1)
+
+        # Should fail - price is 50 < 100
+        result2 = self.workflow.evaluate_trigger(workflow, {"event_type": "test", "payload": {"price": 50}})
+        self.assertFalse(result2)
+
+    def test_execute_workflow(self):
+        trigger = self.WorkflowTrigger(trigger_type=self.TriggerType.MANUAL)
+        action = self.WorkflowAction(
+            action_type="log",
+            params={"message": "Order {order_id} filled"},
+        )
+        workflow = self.workflow.create_workflow(
+            name="Execute Test",
+            trigger=trigger,
+            actions=(action,),
+        )
+
+        execution = self.workflow.execute_workflow(
+            workflow_id=workflow.workflow_id,
+            trigger_payload={"order_id": "123"},
+        )
+
+        self.assertTrue(execution.execution_id.startswith("exec_"))
+        self.assertEqual(execution.status.value, "completed")
+
+    def test_workflow_import_export(self):
+        trigger = self.WorkflowTrigger(trigger_type=self.TriggerType.SCHEDULE)
+        action = self.WorkflowAction(
+            action_type="notify",
+            params={"channel": "email", "message": "Alert"},
+        )
+        workflow = self.workflow.create_workflow(
+            name="Export Test",
+            trigger=trigger,
+            actions=(action,),
+            tags=("test", "export"),
+        )
+
+        exported = self.workflow.export_workflow(workflow.workflow_id)
+        self.assertIsNotNone(exported)
+        self.assertEqual(exported["name"], "Export Test")
+        self.assertIn("test", exported["tags"])
+
+        # Import the exported workflow
+        imported = self.workflow.import_workflow(exported, user_id="user_x")
+        self.assertEqual(imported.name, "Export Test")
+        self.assertEqual(imported.user_id, "user_x")
+
+    def test_list_workflows(self):
+        trigger = self.WorkflowTrigger(trigger_type=self.TriggerType.MANUAL)
+        self.workflow.create_workflow(
+            name="List WF 1",
+            trigger=trigger,
+            actions=(self.WorkflowAction(action_type="log", params={}),),
+            user_id="user1",
+            tags=("tag1",),
+        )
+        self.workflow.create_workflow(
+            name="List WF 2",
+            trigger=trigger,
+            actions=(self.WorkflowAction(action_type="log", params={}),),
+            user_id="user1",
+            tags=("tag1",),
+        )
+        self.workflow.create_workflow(
+            name="List WF 3",
+            trigger=trigger,
+            actions=(self.WorkflowAction(action_type="log", params={}),),
+            user_id="user2",
+            tags=("tag2",),
+        )
+
+        all_wf = self.workflow.list_workflows()
+        self.assertEqual(len(all_wf), 3)
+
+        user1_wf = self.workflow.list_workflows(user_id="user1")
+        self.assertEqual(len(user1_wf), 2)
+
+        tag1_wf = self.workflow.list_workflows(tag="tag1")
+        self.assertEqual(len(tag1_wf), 2)
+
+
+class TestMobileService(unittest.TestCase):
+    """Tests for MobileService (MOB-01 ~ MOB-05)."""
+
+    def setUp(self):
+        from quant_exchange.enhanced import MobileService, NotificationCategory, BiometricType, GestureAction
+        self.mobile = MobileService()
+        self.NotificationCategory = NotificationCategory
+        self.BiometricType = BiometricType
+        self.GestureAction = GestureAction
+
+    def test_get_pwa_manifest(self):
+        """Verify PWA manifest is returned correctly."""
+        manifest = self.mobile.get_pwa_manifest()
+        self.assertEqual(manifest.app_name, "QuantExchange")
+        self.assertEqual(manifest.display, "standalone")
+
+    def test_get_offline_cache_config(self):
+        """Verify offline cache config is returned."""
+        config = self.mobile.get_offline_cache_config()
+        self.assertTrue(config.enabled)
+        self.assertIn("/api/v1/portfolio", config.cached_endpoints)
+
+    def test_service_worker_config(self):
+        """Verify service worker config is generated."""
+        config = self.mobile.generate_service_worker_config()
+        self.assertIn("strategies", config)
+        self.assertIn("static", config["strategies"])
+        self.assertIn("api", config["strategies"])
+
+    def test_notification_preferences(self):
+        """Verify notification preferences management."""
+        prefs = self.mobile.get_notification_preferences("user1")
+        self.assertEqual(prefs.user_id, "user1")
+        self.assertTrue(prefs.enabled)
+
+        updated = self.mobile.update_notification_preferences(
+            "user1",
+            enabled=False,
+            sound_enabled=False,
+        )
+        self.assertFalse(updated.enabled)
+        self.assertFalse(updated.sound_enabled)
+
+    def test_should_send_notification(self):
+        """Verify notification sending logic."""
+        self.mobile.update_notification_preferences(
+            "user1",
+            categories=(self.NotificationCategory.TRADE_EXECUTION,),
+        )
+        # Should send for TRADE_EXECUTION
+        self.assertTrue(self.mobile.should_send_notification(
+            "user1", self.NotificationCategory.TRADE_EXECUTION
+        ))
+        # Should not send for NEWS (not in categories)
+        self.assertFalse(self.mobile.should_send_notification(
+            "user1", self.NotificationCategory.NEWS
+        ))
+
+    def test_register_device(self):
+        """Verify device registration."""
+        session = self.mobile.register_device(
+            user_id="user1",
+            device_id="device_abc",
+            device_name="iPhone 15",
+            os_version="iOS 17.0",
+            app_version="1.0.0",
+            push_token="token_xyz",
+        )
+        self.assertTrue(session.session_id.startswith("mob_"))
+        self.assertEqual(session.user_id, "user1")
+        self.assertEqual(session.device_name, "iPhone 15")
+
+    def test_get_user_sessions(self):
+        """Verify getting user sessions."""
+        self.mobile.register_device("user1", "device1", "Phone1", "iOS16", "1.0.0")
+        self.mobile.register_device("user1", "device2", "Phone2", "iOS17", "1.0.0")
+        sessions = self.mobile.get_user_sessions("user1")
+        self.assertEqual(len(sessions), 2)
+
+    def test_gesture_preferences(self):
+        """Verify gesture preferences management."""
+        prefs = self.mobile.get_gesture_preferences("user1")
+        self.assertIn(self.GestureAction.SWIPE_LEFT_ORDER, prefs.enabled_gestures)
+
+        updated = self.mobile.update_gesture_preferences(
+            "user1",
+            haptic_feedback=False,
+            gesture_sensitivity=1.5,
+        )
+        self.assertFalse(updated.haptic_feedback)
+        self.assertEqual(updated.gesture_sensitivity, 1.5)
+
+    def test_biometric_settings(self):
+        """Verify biometric settings management."""
+        settings = self.mobile.get_biometric_settings("user1")
+        self.assertEqual(settings.biometric_type, self.BiometricType.NONE)
+        self.assertFalse(settings.enabled)
+
+        updated = self.mobile.update_biometric_settings(
+            "user1",
+            biometric_type=self.BiometricType.FACE_ID,
+            enabled=True,
+            require_for_withdrawal=True,
+        )
+        self.assertEqual(updated.biometric_type, self.BiometricType.FACE_ID)
+        self.assertTrue(updated.enabled)
+        self.assertTrue(updated.require_for_withdrawal)
+
+    def test_requires_biometric(self):
+        """Verify biometric requirement checks."""
+        self.mobile.update_biometric_settings(
+            "user1",
+            biometric_type=self.BiometricType.TOUCH_ID,
+            enabled=True,
+            require_for_withdrawal=True,
+        )
+        # Biometric required for withdrawal
+        self.assertTrue(self.mobile.requires_biometric("user1", "withdrawal"))
+        # Not required for login (unless configured)
+        self.assertFalse(self.mobile.requires_biometric("user1", "login"))
 
 
 if __name__ == "__main__":

@@ -8,16 +8,19 @@ Implements the documented report types (RP-01 to RP-06):
 - Cost analysis report
 - Trade detail report (RP-01)
 - Attribution analysis (RP-04)
-- Daily report task (RP-05)
+- Daily/Weekly/Monthly report task (RP-05)
+- Management and compliance reports (RP-06)
 """
 
 from __future__ import annotations
 
+import io
 import uuid
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
 
 from quant_exchange.core.models import (
     Alert,
@@ -374,6 +377,566 @@ class ReportingService:
         """Export a complete report dictionary to formatted JSON string."""
         import json
         return json.dumps(report, indent=2, default=str)
+
+    # ── Weekly/Monthly Report Generation ────────────────────────────────────
+
+    def weekly_report(
+        self,
+        *,
+        account_id: str,
+        snapshots: list[PortfolioSnapshot],
+        positions: dict[str, Position],
+        fills: list[Fill],
+        alerts: list[Alert],
+        metrics: PerformanceMetrics | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+    ) -> dict:
+        """Generate comprehensive weekly report (RP-05)."""
+        end_date = end_date or utc_now()
+        start_date = start_date or (end_date - timedelta(days=7))
+
+        total_pnl = sum(p.realized_pnl for p in positions.values())
+        total_fees = sum(f.fee for f in fills)
+        trading_days = len(snapshots)
+
+        # Calculate weekly metrics
+        weekly_return = 0.0
+        if len(snapshots) >= 2:
+            weekly_return = (snapshots[-1].equity - snapshots[0].equity) / snapshots[0].equity if snapshots[0].equity > 0 else 0.0
+
+        # Daily average metrics
+        avg_daily_pnl = total_pnl / trading_days if trading_days > 0 else 0.0
+        avg_daily_fees = total_fees / trading_days if trading_days > 0 else 0.0
+
+        return {
+            "report_id": str(uuid.uuid4()),
+            "account_id": account_id,
+            "report_type": "weekly",
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "trading_days": trading_days,
+            "account_summary": {
+                "starting_equity": snapshots[0].equity if snapshots else 0.0,
+                "ending_equity": snapshots[-1].equity if snapshots else 0.0,
+                "weekly_return_pct": round(weekly_return * 100, 4),
+                "avg_daily_pnl": round(avg_daily_pnl, 6),
+                "avg_daily_fees": round(avg_daily_fees, 6),
+            },
+            "positions": [
+                {
+                    "instrument_id": p.instrument_id,
+                    "quantity": p.quantity,
+                    "average_cost": p.average_cost,
+                    "last_price": p.last_price,
+                    "realized_pnl": p.realized_pnl,
+                    "unrealized_pnl": (p.last_price - p.average_cost) * p.quantity if p.quantity > 0 else 0.0,
+                }
+                for p in positions.values()
+            ],
+            "trade_summary": {
+                "total_trades": len(fills),
+                "total_pnl": round(total_pnl, 6),
+                "total_fees": round(total_fees, 6),
+                "net_pnl": round(total_pnl - total_fees, 6),
+            },
+            "risk_alerts": self.risk_summary(alerts=alerts),
+            "metrics": {
+                "sharpe_ratio": metrics.sharpe if metrics else None,
+                "max_drawdown": metrics.max_drawdown if metrics else None,
+                "win_rate": metrics.win_rate if metrics else None,
+                "profit_factor": metrics.profit_factor if metrics else None,
+            } if metrics else {},
+        }
+
+    def monthly_report(
+        self,
+        *,
+        account_id: str,
+        snapshots: list[PortfolioSnapshot],
+        positions: dict[str, Position],
+        fills: list[Fill],
+        alerts: list[Alert],
+        metrics: PerformanceMetrics | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+    ) -> dict:
+        """Generate comprehensive monthly report (RP-05)."""
+        end_date = end_date or utc_now()
+        start_date = start_date or (end_date - timedelta(days=30))
+
+        total_pnl = sum(p.realized_pnl for p in positions.values())
+        total_fees = sum(f.fee for f in fills)
+        trading_days = len(snapshots)
+
+        # Calculate monthly metrics
+        monthly_return = 0.0
+        if len(snapshots) >= 2:
+            monthly_return = (snapshots[-1].equity - snapshots[0].equity) / snapshots[0].equity if snapshots[0].equity > 0 else 0.0
+
+        # Daily average metrics
+        avg_daily_pnl = total_pnl / trading_days if trading_days > 0 else 0.0
+        avg_daily_fees = total_fees / trading_days if trading_days > 0 else 0.0
+
+        # Performance metrics summary
+        perf_summary = {}
+        if metrics:
+            perf_summary = {
+                "total_return": round(metrics.total_return, 6),
+                "annualized_return": round(metrics.annualized_return, 6),
+                "sharpe_ratio": round(metrics.sharpe, 4),
+                "sortino_ratio": round(metrics.sortino, 4),
+                "calmar_ratio": round(metrics.calmar, 4),
+                "max_drawdown": round(metrics.max_drawdown, 6),
+                "win_rate": round(metrics.win_rate, 4),
+                "profit_factor": round(metrics.profit_factor, 4),
+                "total_trades": metrics.total_trades,
+                "avg_trade_return": round(metrics.avg_trade_return, 6),
+            }
+
+        # Sector attribution
+        sector_pnl: dict[str, float] = {}
+        for p in positions.values():
+            sector = getattr(p, 'sector', 'Unknown')
+            sector_pnl[sector] = sector_pnl.get(sector, 0.0) + p.realized_pnl
+
+        return {
+            "report_id": str(uuid.uuid4()),
+            "account_id": account_id,
+            "report_type": "monthly",
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "trading_days": trading_days,
+            "account_summary": {
+                "starting_equity": snapshots[0].equity if snapshots else 0.0,
+                "ending_equity": snapshots[-1].equity if snapshots else 0.0,
+                "monthly_return_pct": round(monthly_return * 100, 4),
+                "avg_daily_pnl": round(avg_daily_pnl, 6),
+                "avg_daily_fees": round(avg_daily_fees, 6),
+            },
+            "positions": [
+                {
+                    "instrument_id": p.instrument_id,
+                    "quantity": p.quantity,
+                    "average_cost": p.average_cost,
+                    "last_price": p.last_price,
+                    "realized_pnl": p.realized_pnl,
+                    "unrealized_pnl": (p.last_price - p.average_cost) * p.quantity if p.quantity > 0 else 0.0,
+                }
+                for p in positions.values()
+            ],
+            "sector_attribution": sector_pnl,
+            "trade_summary": {
+                "total_trades": len(fills),
+                "total_pnl": round(total_pnl, 6),
+                "total_fees": round(total_fees, 6),
+                "net_pnl": round(total_pnl - total_fees, 6),
+            },
+            "performance_metrics": perf_summary,
+            "risk_alerts": self.risk_summary(alerts=alerts),
+        }
+
+    # ── PDF Export ──────────────────────────────────────────────────────────
+
+    def export_report_to_pdf(
+        self,
+        report: dict,
+        title: str = "QuantExchange Report",
+    ) -> bytes:
+        """Export a report to PDF format (RP-05, RP-06).
+
+        Uses ReportLab-style generation for PDF output.
+        Falls back to a simplified text-based PDF if ReportLab is not available.
+        """
+        try:
+            from reportlab.lib import colors
+            from reportlab.lib.pagesizes import letter
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.units import inch
+            from reportlab.platypus import (
+                Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle, PageBreak
+            )
+            from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+
+            buffer = io.BytesIO()
+            doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.5*inch, bottomMargin=0.5*inch)
+
+            styles = getSampleStyleSheet()
+            styles.add(ParagraphStyle(name='ReportTitle', fontSize=18, alignment=TA_CENTER, spaceAfter=20))
+            styles.add(ParagraphStyle(name='SectionHeader', fontSize=14, spaceBefore=15, spaceAfter=10))
+            styles.add(ParagraphStyle(name='SubsectionHeader', fontSize=11, spaceBefore=10, spaceAfter=5))
+            styles.add(ParagraphStyle(name='Footer', fontSize=8, alignment=TA_RIGHT, textColor=colors.gray))
+
+            story = []
+
+            # Title
+            story.append(Paragraph(title, styles['ReportTitle']))
+            story.append(Spacer(1, 0.2*inch))
+
+            # Report metadata
+            report_type = report.get('report_type', 'daily').upper()
+            report_date = report.get('report_date', report.get('end_date', utc_now().isoformat()))
+            story.append(Paragraph(f"<b>Report Type:</b> {report_type}", styles['Normal']))
+            story.append(Paragraph(f"<b>Generated:</b> {report_date}", styles['Normal']))
+            story.append(Paragraph(f"<b>Account:</b> {report.get('account_id', 'N/A')}", styles['Normal']))
+            story.append(Spacer(1, 0.3*inch))
+
+            # Account Summary Section
+            story.append(Paragraph("Account Summary", styles['SectionHeader']))
+            account_summary = report.get('account_summary', {})
+            summary_data = [
+                ["Metric", "Value"],
+                ["Equity", f"${account_summary.get('equity', 0):,.2f}"],
+                ["Cash", f"${account_summary.get('cash', 0):,.2f}"],
+                ["Gross Exposure", f"${account_summary.get('gross_exposure', 0):,.2f}"],
+                ["Net Exposure", f"${account_summary.get('net_exposure', 0):,.2f}"],
+                ["Leverage", f"{account_summary.get('leverage', 0):.2f}x"],
+                ["Drawdown", f"{account_summary.get('drawdown', 0) * 100:.2f}%"],
+            ]
+            if 'starting_equity' in account_summary:
+                summary_data = [
+                    ["Metric", "Value"],
+                    ["Starting Equity", f"${account_summary.get('starting_equity', 0):,.2f}"],
+                    ["Ending Equity", f"${account_summary.get('ending_equity', 0):,.2f}"],
+                    ["Return", f"{account_summary.get('weekly_return_pct', account_summary.get('monthly_return_pct', 0)):.2f}%"],
+                ]
+
+            summary_table = Table(summary_data, colWidths=[2.5*inch, 2.5*inch])
+            summary_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2196F3')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 10),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#F5F5F5')),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ]))
+            story.append(summary_table)
+            story.append(Spacer(1, 0.2*inch))
+
+            # Performance Metrics
+            if 'metrics' in report and report['metrics']:
+                story.append(Paragraph("Performance Metrics", styles['SectionHeader']))
+                m = report['metrics']
+                metrics_data = [
+                    ["Metric", "Value"],
+                    ["Sharpe Ratio", f"{m.get('sharpe_ratio', m.get('sharpe', 0)):.2f}"],
+                    ["Max Drawdown", f"{m.get('max_drawdown', 0) * 100:.2f}%"],
+                    ["Win Rate", f"{m.get('win_rate', 0) * 100:.2f}%"],
+                    ["Profit Factor", f"{m.get('profit_factor', 0):.2f}"],
+                ]
+                if 'total_return' in m:
+                    metrics_data.insert(2, ["Total Return", f"{m['total_return'] * 100:.2f}%"])
+                if 'annualized_return' in m:
+                    metrics_data.insert(3, ["Annualized Return", f"{m['annualized_return'] * 100:.2f}%"])
+
+                metrics_table = Table(metrics_data, colWidths=[2.5*inch, 2.5*inch])
+                metrics_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#4CAF50')),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 10),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#E8F5E9')),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                ]))
+                story.append(metrics_table)
+                story.append(Spacer(1, 0.2*inch))
+
+            # Positions Section
+            if 'positions' in report and report['positions']:
+                story.append(Paragraph("Open Positions", styles['SectionHeader']))
+                pos_data = [["Instrument", "Quantity", "Avg Cost", "Last Price", "Realized P&L"]]
+                for p in report['positions']:
+                    pnl = p.get('realized_pnl', 0)
+                    pnl_str = f"${pnl:,.2f}" if pnl >= 0 else f"(${abs(pnl):,.2f})"
+                    pos_data.append([
+                        p.get('instrument_id', ''),
+                        f"{p.get('quantity', 0):.2f}",
+                        f"${p.get('average_cost', 0):.2f}",
+                        f"${p.get('last_price', 0):.2f}",
+                        pnl_str,
+                    ])
+
+                pos_table = Table(pos_data, colWidths=[1.5*inch, 1*inch, 1*inch, 1*inch, 1.2*inch])
+                pos_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#607D8B')),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 9),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                ]))
+                story.append(pos_table)
+                story.append(Spacer(1, 0.2*inch))
+
+            # Trade Summary
+            if 'trade_summary' in report:
+                story.append(Paragraph("Trade Summary", styles['SectionHeader']))
+                ts = report['trade_summary']
+                trade_data = [
+                    ["Metric", "Value"],
+                    ["Total Trades", str(ts.get('total_trades', 0))],
+                    ["Total P&L", f"${ts.get('total_pnl', 0):,.2f}"],
+                    ["Total Fees", f"${ts.get('total_fees', 0):,.2f}"],
+                    ["Net P&L", f"${ts.get('net_pnl', 0):,.2f}"],
+                ]
+                trade_table = Table(trade_data, colWidths=[2.5*inch, 2.5*inch])
+                trade_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#FF9800')),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 10),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#FFF3E0')),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                ]))
+                story.append(trade_table)
+                story.append(Spacer(1, 0.2*inch))
+
+            # Risk Alerts
+            if 'risk_alerts' in report:
+                story.append(Paragraph("Risk Alerts", styles['SectionHeader']))
+                ra = report['risk_alerts']
+                alert_data = [
+                    ["Metric", "Value"],
+                    ["Total Alerts", str(ra.get('total_alerts', 0))],
+                    ["Critical", str(ra.get('critical_alerts', 0))],
+                    ["Emergency", str(ra.get('emergency_alerts', 0))],
+                    ["Risk Rejections", str(ra.get('risk_rejections', 0))],
+                ]
+                alert_table = Table(alert_data, colWidths=[2.5*inch, 2.5*inch])
+                alert_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#F44336')),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 10),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#FFEBEE')),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                ]))
+                story.append(alert_table)
+
+            # Footer
+            story.append(Spacer(1, 0.5*inch))
+            story.append(Paragraph(f"Generated by QuantExchange | {utc_now().strftime('%Y-%m-%d %H:%M:%S UTC')}", styles['Footer']))
+
+            doc.build(story)
+            return buffer.getvalue()
+
+        except ImportError:
+            # Fallback: Return simple text-based PDF
+            return self._generate_simple_pdf(report, title)
+
+    def _generate_simple_pdf(self, report: dict, title: str) -> bytes:
+        """Generate a simple text-based PDF when ReportLab is not available."""
+        lines = [
+            title,
+            "=" * 60,
+            f"Report Type: {report.get('report_type', 'daily').upper()}",
+            f"Generated: {utc_now().isoformat()}",
+            f"Account: {report.get('account_id', 'N/A')}",
+            "",
+            "ACCOUNT SUMMARY",
+            "-" * 40,
+        ]
+
+        account_summary = report.get('account_summary', {})
+        for key, value in account_summary.items():
+            lines.append(f"  {key}: {value}")
+
+        if 'positions' in report:
+            lines.append("")
+            lines.append("OPEN POSITIONS")
+            lines.append("-" * 40)
+            for p in report['positions']:
+                lines.append(f"  {p.get('instrument_id')}: Qty={p.get('quantity')}, P&L=${p.get('realized_pnl', 0):.2f}")
+
+        if 'trade_summary' in report:
+            lines.append("")
+            lines.append("TRADE SUMMARY")
+            lines.append("-" * 40)
+            for key, value in report['trade_summary'].items():
+                lines.append(f"  {key}: {value}")
+
+        lines.append("")
+        lines.append("=" * 60)
+        lines.append(f"Generated by QuantExchange | {utc_now().strftime('%Y-%m-%d %H:%M:%S UTC')}")
+
+        content = "\n".join(lines)
+        # Simple PDF header
+        pdf_content = f"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n4 0 obj\n<< /Length {len(content) + 100} >>\nstream\nBT\n/F1 12 Tf\n50 750 Td\n{content}\nET\nendstream\nendobj\n5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\nxref\n0 6\n0000000000 65535 f\n0000000009 00000 n\n0000000058 00000 n\n0000000115 00000 n\n0000000266 00000 n\n0000000600 00000 n\ntrailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n674\n%%EOF"
+        return pdf_content.encode('utf-8')
+
+    # ── Management and Compliance Reports (RP-06) ─────────────────────────────────
+
+    def generate_compliance_report(
+        self,
+        *,
+        account_id: str,
+        positions: dict[str, Position],
+        fills: list[Fill],
+        alerts: list[Alert],
+        risk_metrics: dict | None = None,
+        report_date: datetime | None = None,
+    ) -> dict:
+        """Generate management and compliance report (RP-06).
+
+        Covers:
+        - Regulatory requirements
+        - Risk limit compliance
+        - Trade surveillance
+        """
+        report_date = report_date or utc_now()
+        total_pnl = sum(p.realized_pnl for p in positions.values())
+        total_exposure = sum(abs(p.last_price * p.quantity) for p in positions.values())
+
+        # Risk limit compliance checks
+        compliance_checks = []
+
+        # Check leverage limits
+        leverage = risk_metrics.get('leverage', 1.0) if risk_metrics else 1.0
+        compliance_checks.append({
+            "check": "Leverage Limit",
+            "limit": "3.0x",
+            "current": f"{leverage:.2f}x",
+            "status": "PASS" if leverage <= 3.0 else "FAIL",
+        })
+
+        # Check drawdown limits
+        drawdown = risk_metrics.get('drawdown', 0.0) if risk_metrics else 0.0
+        compliance_checks.append({
+            "check": "Max Drawdown Limit",
+            "limit": "20%",
+            "current": f"{drawdown * 100:.2f}%",
+            "status": "PASS" if drawdown <= 0.20 else "FAIL",
+        })
+
+        # Check concentration limits (single position)
+        max_concentration = 0.0
+        for p in positions.values():
+            if total_exposure > 0:
+                concentration = abs(p.last_price * p.quantity) / total_exposure
+                max_concentration = max(max_concentration, concentration)
+
+        compliance_checks.append({
+            "check": "Position Concentration",
+            "limit": "30%",
+            "current": f"{max_concentration * 100:.2f}%",
+            "status": "PASS" if max_concentration <= 0.30 else "FAIL",
+        })
+
+        # Overall compliance status
+        all_passed = all(check['status'] == 'PASS' for check in compliance_checks)
+
+        return {
+            "report_id": str(uuid.uuid4()),
+            "account_id": account_id,
+            "report_type": "compliance",
+            "report_date": report_date.isoformat(),
+            "overall_status": "COMPLIANT" if all_passed else "NON-COMPLIANT",
+            "compliance_checks": compliance_checks,
+            "risk_summary": {
+                "total_exposure": round(total_exposure, 2),
+                "total_pnl": round(total_pnl, 2),
+                "position_count": len(positions),
+                "leverage": leverage,
+                "drawdown": round(drawdown * 100, 2),
+            },
+            "trade_surveillance": {
+                "total_trades": len(fills),
+                "alert_count": len(alerts),
+                "critical_alerts": len([a for a in alerts if a.severity == AlertSeverity.CRITICAL]),
+            },
+            "generated_at": utc_now().isoformat(),
+        }
+
+    def generate_management_report(
+        self,
+        *,
+        account_id: str,
+        snapshots: list[PortfolioSnapshot],
+        positions: dict[str, Position],
+        fills: list[Fill],
+        metrics: PerformanceMetrics | None = None,
+        strategy_performance: dict | None = None,
+        report_date: datetime | None = None,
+    ) -> dict:
+        """Generate executive management report (RP-06).
+
+        Provides high-level overview for management decision making.
+        """
+        report_date = report_date or utc_now()
+
+        if len(snapshots) >= 2:
+            period_return = (snapshots[-1].equity - snapshots[0].equity) / snapshots[0].equity if snapshots[0].equity > 0 else 0.0
+            starting_equity = snapshots[0].equity
+            ending_equity = snapshots[-1].equity
+        else:
+            period_return = 0.0
+            starting_equity = snapshots[-1].equity if snapshots else 0.0
+            ending_equity = starting_equity
+
+        total_fees = sum(f.fee for f in fills)
+
+        # Strategy breakdown
+        strategy_breakdown = []
+        if strategy_performance:
+            for strategy_id, perf in strategy_performance.items():
+                strategy_breakdown.append({
+                    "strategy_id": strategy_id,
+                    "pnl": perf.get('pnl', 0),
+                    "trades": perf.get('trades', 0),
+                    "return_pct": perf.get('return_pct', 0),
+                })
+
+        # Key risk indicators
+        risk_indicators = {
+            "var_95": metrics.max_drawdown * 1.65 if metrics else 0.0,  # Simplified VaR
+            "leverage": snapshots[-1].leverage if snapshots and hasattr(snapshots[-1], 'leverage') else 1.0,
+            "concentration_risk": max(
+                (abs(p.last_price * p.quantity) / snapshots[-1].gross_exposure if snapshots and hasattr(snapshots[-1], 'gross_exposure') and snapshots[-1].gross_exposure > 0 else 0.0)
+                for p in positions.values()
+            ) if positions else 0.0,
+        }
+
+        return {
+            "report_id": str(uuid.uuid4()),
+            "account_id": account_id,
+            "report_type": "management",
+            "report_date": report_date.isoformat(),
+            "executive_summary": {
+                "period_return_pct": round(period_return * 100, 2),
+                "starting_equity": round(starting_equity, 2),
+                "ending_equity": round(ending_equity, 2),
+                "total_fees_paid": round(total_fees, 2),
+                "active_positions": len(positions),
+                "total_trades": len(fills),
+            },
+            "performance_summary": {
+                "sharpe_ratio": round(metrics.sharpe, 2) if metrics else None,
+                "max_drawdown_pct": round(metrics.max_drawdown * 100, 2) if metrics else None,
+                "win_rate_pct": round(metrics.win_rate * 100, 2) if metrics else None,
+                "profit_factor": round(metrics.profit_factor, 2) if metrics else None,
+                "avg_trade_return_pct": round(metrics.avg_trade_return * 100, 4) if metrics else None,
+            },
+            "strategy_breakdown": strategy_breakdown,
+            "risk_indicators": risk_indicators,
+            "top_positions": [
+                {
+                    "instrument_id": p.instrument_id,
+                    "exposure": round(abs(p.last_price * p.quantity), 2),
+                    "pnl": round(p.realized_pnl, 2),
+                }
+                for p in sorted(positions.values(), key=lambda x: abs(x.last_price * x.quantity), reverse=True)[:5]
+            ],
+            "generated_at": utc_now().isoformat(),
+        }
 
 
 class ReportScheduler:

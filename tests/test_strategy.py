@@ -7,7 +7,11 @@ import unittest
 
 from quant_exchange.core.models import Direction, DirectionalBias, Position
 from quant_exchange.strategy import MovingAverageSentimentStrategy, StrategyContext, StrategyRegistry
-from quant_exchange.strategy.factors import ema, momentum, realized_volatility, rsi, sma, zscore
+from quant_exchange.strategy.factors import (
+    amihud_illiquidity, atr, bollinger_bands, bollinger_percent_b, cci, ema,
+    ewma_volatility, momentum, obv, pe_score, rate_of_change, realized_volatility,
+    roe_score, rsi, sma, stochastic_k, vwap, williams_r, zscore,
+)
 
 from .fixtures import sample_documents, sample_instrument, sample_klines
 from quant_exchange.intelligence import IntelligenceEngine
@@ -147,6 +151,194 @@ class StrategyTests(unittest.TestCase):
                 equity=100_000.0,
                 latest_bias=bias,
             )
+
+
+class FactorComprehensiveTests(unittest.TestCase):
+    """Comprehensive tests for all technical analysis factor functions."""
+
+    def test_rate_of_change(self) -> None:
+        """Rate of Change calculates percentage change over window."""
+        values = [100.0, 105.0, 110.0, 115.0, 120.0]
+        # (120 - 100) / 100 * 100 = 20%
+        self.assertAlmostEqual(rate_of_change(values, 4), 20.0)
+        # (120 - 110) / 110 * 100 ≈ 9.09%
+        self.assertAlmostEqual(rate_of_change(values, 2), 9.0909, places=3)
+
+    def test_rate_of_change_edge_cases(self) -> None:
+        """ROC handles empty inputs and insufficient data."""
+        self.assertEqual(rate_of_change([], 3), 0.0)
+        self.assertEqual(rate_of_change([100.0], 3), 0.0)
+        self.assertEqual(rate_of_change([100.0, 105.0], 3), 0.0)
+        self.assertEqual(rate_of_change([100.0, 0.0], 1), -100.0)  # division by zero handled
+
+    def test_bollinger_percent_b(self) -> None:
+        """Bollinger %B shows position of price relative to bands."""
+        values = [100.0, 102.0, 104.0, 103.0, 101.0, 105.0, 107.0, 106.0, 108.0, 110.0,
+                  112.0, 111.0, 113.0, 115.0, 114.0, 116.0, 118.0, 117.0, 119.0, 120.0]
+        pb = bollinger_percent_b(values, window=20, num_std=2.0)
+        # Value should be between 0 and 1 for price within bands
+        self.assertGreaterEqual(pb, 0.0)
+        self.assertLessEqual(pb, 1.0)
+
+    def test_bollinger_percent_b_edge_cases(self) -> None:
+        """Bollinger %B handles insufficient data."""
+        self.assertEqual(bollinger_percent_b([], 20), 0.5)  # returns 0.5 when upper==lower
+        self.assertEqual(bollinger_percent_b([100.0], 20), 0.5)
+        self.assertEqual(bollinger_percent_b([100.0] * 10, 20), 0.5)
+
+    def test_ewma_volatility(self) -> None:
+        """EWMA volatility computes exponentially weighted volatility."""
+        values = [100.0, 101.0, 102.0, 101.5, 103.0]
+        vol = ewma_volatility(values, window=4, decay=0.94)
+        self.assertGreaterEqual(vol, 0.0)
+
+    def test_ewma_volatility_edge_cases(self) -> None:
+        """EWMA volatility handles empty inputs."""
+        self.assertEqual(ewma_volatility([], 5), 0.0)
+        self.assertEqual(ewma_volatility([100.0], 5), 0.0)
+        self.assertEqual(ewma_volatility([100.0, 100.0], 5), 0.0)
+
+    def test_stochastic_k(self) -> None:
+        """Stochastic %K measures position relative to high-low range."""
+        highs = [110.0, 112.0, 111.0, 113.0, 115.0]
+        lows = [98.0, 99.0, 97.0, 100.0, 101.0]
+        closes = [105.0, 108.0, 106.0, 109.0, 112.0]
+        k = stochastic_k(highs, lows, closes, window=3)
+        # (112 - 97) / (115 - 97) * 100 = 83.33%
+        self.assertAlmostEqual(k, 83.33, places=1)
+
+    def test_stochastic_k_edge_cases(self) -> None:
+        """Stochastic %K handles insufficient data."""
+        self.assertEqual(stochastic_k([], [], [], 14), 50.0)
+        self.assertEqual(stochastic_k([100.0], [99.0], [100.0], 14), 50.0)
+        self.assertEqual(stochastic_k([110.0, 110.0], [100.0, 100.0], [105.0, 105.0], 2), 50.0)
+
+    def test_williams_r(self) -> None:
+        """Williams %R oscillator ranges from -100 to 0."""
+        highs = [110.0, 112.0, 111.0, 113.0, 115.0]
+        lows = [98.0, 99.0, 97.0, 100.0, 101.0]
+        closes = [105.0, 108.0, 106.0, 109.0, 112.0]
+        wr = williams_r(highs, lows, closes, window=3)
+        # (115 - 112) / (115 - 97) * -100 = -16.67%
+        self.assertAlmostEqual(wr, -16.67, places=1)
+
+    def test_williams_r_edge_cases(self) -> None:
+        """Williams %R handles insufficient data."""
+        self.assertEqual(williams_r([], [], [], 14), -50.0)
+        self.assertEqual(williams_r([100.0], [99.0], [100.0], 14), -50.0)
+        self.assertEqual(williams_r([110.0, 110.0], [100.0, 100.0], [105.0, 105.0], 2), -50.0)
+
+    def test_cci(self) -> None:
+        """Commodity Channel Index measures deviation from average."""
+        highs = [110.0, 112.0, 111.0, 113.0, 115.0]
+        lows = [98.0, 99.0, 97.0, 100.0, 101.0]
+        closes = [105.0, 108.0, 106.0, 109.0, 112.0]
+        cci_val = cci(highs, lows, closes, window=4)
+        # CCI should be a reasonable value (not 0 with enough data)
+        self.assertNotEqual(cci_val, 0.0)
+
+    def test_cci_edge_cases(self) -> None:
+        """CCI handles insufficient data."""
+        self.assertEqual(cci([], [], [], 20), 0.0)
+        self.assertEqual(cci([100.0], [99.0], [100.0], 20), 0.0)
+
+    def test_obv(self) -> None:
+        """On-Balance Volume cumulates volume based on price direction."""
+        closes = [100.0, 101.0, 99.5, 100.5, 102.0]
+        volumes = [1000.0, 1500.0, 1200.0, 800.0, 2000.0]
+        obv_val = obv(closes, volumes)
+        # +1000 +1500 -1200 +800 +2000 = 3100
+        self.assertEqual(obv_val, 3100.0)
+
+    def test_obv_edge_cases(self) -> None:
+        """OBV handles insufficient data."""
+        self.assertEqual(obv([], []), 0.0)
+        self.assertEqual(obv([100.0], [1000.0]), 0.0)
+
+    def test_vwap(self) -> None:
+        """Volume-Weighted Average Price."""
+        highs = [105.0, 107.0, 106.0, 108.0, 110.0]
+        lows = [95.0, 98.0, 97.0, 99.0, 101.0]
+        closes = [100.0, 103.0, 102.0, 104.0, 106.0]
+        volumes = [1000.0, 1500.0, 1200.0, 800.0, 2000.0]
+        vwap_val = vwap(highs, lows, closes, volumes)
+        self.assertGreater(vwap_val, 0.0)
+        # VWAP should be between low and high prices
+        self.assertGreaterEqual(vwap_val, min(closes))
+        self.assertLessEqual(vwap_val, max(closes))
+
+    def test_vwap_edge_cases(self) -> None:
+        """VWAP handles empty inputs."""
+        self.assertEqual(vwap([], [], [], []), 0.0)
+        self.assertEqual(vwap([100.0], [99.0], [100.0], [0.0]), 0.0)
+
+    def test_amihud_illiquidity(self) -> None:
+        """Amihud illiquidity ratio measures price impact of volume."""
+        closes = [100.0, 101.0, 100.5, 102.0, 101.5, 103.0, 102.5, 104.0, 103.5, 105.0]
+        volumes = [1000000.0] * 10
+        illiq = amihud_illiquidity(closes, volumes, window=5)
+        self.assertGreaterEqual(illiq, 0.0)
+
+    def test_amihud_illiquidity_edge_cases(self) -> None:
+        """Amihud handles empty inputs."""
+        self.assertEqual(amihud_illiquidity([], [], 20), 0.0)
+        self.assertEqual(amihud_illiquidity([100.0], [1000.0], 20), 0.0)
+
+    def test_pe_score(self) -> None:
+        """PE score ranks P/E relative to sector median."""
+        # P/E equal to sector median = 1.0 (best value per formula)
+        self.assertEqual(pe_score(15.0, 15.0), 1.0)
+        # Lower P/E = higher score (capped at 1.0)
+        self.assertEqual(pe_score(10.0, 15.0), 1.0)
+        # Higher P/E = lower score: ratio = 20/15 = 1.333, score = 1 - 0.333*0.5 = 0.833
+        self.assertAlmostEqual(pe_score(20.0, 15.0), 0.8333, places=3)
+
+    def test_pe_score_edge_cases(self) -> None:
+        """PE score handles invalid inputs."""
+        self.assertEqual(pe_score(0.0, 15.0), 0.5)
+        self.assertEqual(pe_score(-10.0, 15.0), 0.5)
+        self.assertEqual(pe_score(15.0, 0.0), 0.5)
+
+    def test_roe_score(self) -> None:
+        """ROE score normalizes return on equity to 0-1 range."""
+        # ROE of 0.25 (25%) = 1.0
+        self.assertEqual(roe_score(0.25), 1.0)
+        # ROE of 0.125 (12.5%) = 0.5
+        self.assertEqual(roe_score(0.125), 0.5)
+        # ROE of 0 (break-even) = 0
+        self.assertEqual(roe_score(0.0), 0.0)
+        # Negative ROE should clamp to 0
+        self.assertEqual(roe_score(-0.1), 0.0)
+
+    def test_bollinger_bands(self) -> None:
+        """Bollinger Bands return upper, middle, lower values."""
+        values = [100.0] * 20
+        upper, middle, lower = bollinger_bands(values, window=20, num_std=2.0)
+        # All values same, so stddev = 0, bands collapse to mean
+        self.assertEqual(upper, 100.0)
+        self.assertEqual(middle, 100.0)
+        self.assertEqual(lower, 100.0)
+
+    def test_bollinger_bands_with_trend(self) -> None:
+        """Bollinger Bands widen as price deviates from mean."""
+        # Steady uptrend
+        values = [100.0 + i for i in range(20)]
+        upper, middle, lower = bollinger_bands(values, window=20, num_std=2.0)
+        self.assertGreater(upper, middle)
+        self.assertGreater(middle, lower)
+
+    def test_atr(self) -> None:
+        """Average True Range measures volatility."""
+        highs = [110.0, 112.0, 111.0, 113.0, 115.0]
+        lows = [98.0, 99.0, 97.0, 100.0, 101.0]
+        closes = [105.0, 108.0, 106.0, 109.0, 112.0]
+        atr_val = atr(highs, lows, closes, window=4)
+        self.assertGreater(atr_val, 0.0)
+
+    def test_atr_edge_cases(self) -> None:
+        """ATR handles insufficient data."""
+        self.assertEqual(atr([], [], [], 14), 0.0)
+        self.assertEqual(atr([100.0], [99.0], [100.0], 14), 0.0)
 
 
 if __name__ == "__main__":

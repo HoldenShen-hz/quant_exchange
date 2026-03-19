@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import uuid
 import math
+from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -632,3 +633,705 @@ class PortfolioAllocatorService:
     def get_user_allocations(self, user_id: str) -> list[PortfolioAllocation]:
         """Get all allocations for a user."""
         return [a for a in self._allocations.values() if a.user_id == user_id]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PF-04: Inter-Strategy Risk Exposure Aggregation
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass(slots=True)
+class StrategyExposure:
+    """Risk exposure for a single strategy."""
+
+    strategy_id: str
+    gross_exposure: float
+    net_exposure: float
+    directional_exposure: float  # positive = long bias, negative = short bias
+    sector_exposures: dict[str, float]  # sector -> exposure
+    instrument_exposures: dict[str, float]  # instrument_id -> exposure
+    leverage: float
+    correlation_to_benchmark: float
+
+
+@dataclass(slots=True)
+class AggregatedExposure:
+    """Aggregated risk exposure across multiple strategies."""
+
+    exposure_id: str
+    total_gross_exposure: float
+    total_net_exposure: float
+    net_directional_exposure: float
+    strategy_exposures: dict[str, StrategyExposure]
+    aggregate_sector_exposures: dict[str, float]
+    aggregate_instrument_exposures: dict[str, float]
+    concentration_risk: dict[str, float]  # instrument/sector -> concentration %
+    leverage_ratio: float
+    correlation_matrix: dict[str, dict[str, float]]
+    created_at: str = field(default_factory=_now)
+
+
+class RiskExposureAggregator:
+    """Aggregates risk exposures across multiple strategies (PF-04).
+
+    Provides:
+    - Cross-strategy exposure aggregation
+    - Sector and instrument concentration analysis
+    - Correlation-based risk contribution
+    - Net vs gross exposure analysis
+    """
+
+    def __init__(self, benchmark_returns: list[float] | None = None) -> None:
+        self.benchmark_returns = benchmark_returns or []
+        self._strategy_positions: dict[str, dict[str, float]] = {}  # strategy_id -> {instrument_id -> quantity}
+        self._strategy_cash: dict[str, float] = {}
+        self._strategy_returns: dict[str, list[float]] = defaultdict(list)
+        self._sector_map: dict[str, str] = {}  # instrument_id -> sector
+
+    def register_instrument_sector(self, instrument_id: str, sector: str) -> None:
+        """Register the sector for an instrument."""
+        self._sector_map[instrument_id] = sector
+
+    def record_strategy_position(
+        self,
+        strategy_id: str,
+        positions: dict[str, float],
+        cash: float = 0.0,
+    ) -> None:
+        """Record positions for a strategy (instrument_id -> quantity)."""
+        self._strategy_positions[strategy_id] = positions.copy()
+        self._strategy_cash[strategy_id] = cash
+
+    def record_strategy_return(self, strategy_id: str, return_pct: float) -> None:
+        """Record a return for correlation calculation."""
+        self._strategy_returns[strategy_id].append(return_pct)
+        if len(self._strategy_returns[strategy_id]) > 100:
+            self._strategy_returns[strategy_id] = self._strategy_returns[strategy_id][-100:]
+
+    def aggregate_exposures(
+        self,
+        prices: dict[str, float],
+        instrument_sectors: dict[str, str] | None = None,
+    ) -> AggregatedExposure:
+        """Aggregate exposures across all registered strategies."""
+        if instrument_sectors:
+            for iid, sector in instrument_sectors.items():
+                self._sector_map[iid] = sector
+
+        strategy_exposures: dict[str, StrategyExposure] = {}
+        aggregate_sector: dict[str, float] = defaultdict(float)
+        aggregate_instrument: dict[str, float] = defaultdict(float)
+        total_gross = 0.0
+        total_net = 0.0
+
+        for strategy_id, positions in self._strategy_positions.items():
+            gross_exp = 0.0
+            net_exp = 0.0
+            long_exp = 0.0
+            short_exp = 0.0
+            sector_exp: dict[str, float] = defaultdict(float)
+            instr_exp: dict[str, float] = {}
+
+            equity = self._strategy_cash.get(strategy_id, 0.0) + sum(
+                qty * prices.get(iid, 0.0) for iid, qty in positions.items()
+            )
+
+            for iid, qty in positions.items():
+                price = prices.get(iid, 0.0)
+                notional = qty * price
+                sector = self._sector_map.get(iid, "UNKNOWN")
+
+                gross_exp += abs(notional)
+                net_exp += notional
+                if qty > 0:
+                    long_exp += notional
+                else:
+                    short_exp += notional
+
+                sector_exp[sector] += notional
+                instr_exp[iid] = notional
+                aggregate_instrument[iid] += notional
+
+            total_gross += gross_exp
+            total_net += net_exp
+
+            directional = (long_exp - abs(short_exp)) / equity if equity > 0 else 0.0
+            leverage = gross_exp / abs(equity) if equity > 0 else 0.0
+
+            corr_benchmark = 0.0
+            if self.benchmark_returns and self._strategy_returns.get(strategy_id):
+                strat_rets = self._strategy_returns[strategy_id]
+                min_len = min(len(strat_rets), len(self.benchmark_returns))
+                if min_len >= 2:
+                    mean_strat = sum(strat_rets[-min_len:]) / min_len
+                    mean_bench = sum(self.benchmark_returns[-min_len:]) / min_len
+                    cov = sum(
+                        (strat_rets[-min_len + k] - mean_strat) * (self.benchmark_returns[-min_len + k] - mean_bench)
+                        for k in range(min_len)
+                    ) / min_len
+                    std_strat = math.sqrt(sum((r - mean_strat) ** 2 for r in strat_rets[-min_len:]) / min_len)
+                    std_bench = math.sqrt(sum((r - mean_bench) ** 2 for r in self.benchmark_returns[-min_len:]) / min_len)
+                    corr_benchmark = cov / (std_strat * std_bench) if std_strat * std_bench > 0 else 0.0
+
+            strategy_exposures[strategy_id] = StrategyExposure(
+                strategy_id=strategy_id,
+                gross_exposure=gross_exp,
+                net_exposure=net_exp,
+                directional_exposure=directional,
+                sector_exposures=dict(sector_exp),
+                instrument_exposures=instr_exp,
+                leverage=leverage,
+                correlation_to_benchmark=corr_benchmark,
+            )
+
+            for sector, exp in sector_exp.items():
+                aggregate_sector[sector] += exp
+
+        # Concentration risk
+        concentration: dict[str, float] = {}
+        if total_gross > 0:
+            for iid, exp in aggregate_instrument.items():
+                concentration[iid] = abs(exp) / total_gross
+
+        # Correlation matrix
+        corr_matrix = self._compute_correlation_matrix()
+
+        return AggregatedExposure(
+            exposure_id=f"ae:{uuid.uuid4().hex[:12]}",
+            total_gross_exposure=total_gross,
+            total_net_exposure=total_net,
+            net_directional_exposure=(total_net / total_gross) if total_gross > 0 else 0.0,
+            strategy_exposures=strategy_exposures,
+            aggregate_sector_exposures=dict(aggregate_sector),
+            aggregate_instrument_exposures=dict(aggregate_instrument),
+            concentration_risk=concentration,
+            leverage_ratio=total_gross / abs(sum(self._strategy_cash.values())) if self._strategy_cash else 0.0,
+            correlation_matrix=corr_matrix,
+        )
+
+    def _compute_correlation_matrix(self) -> dict[str, dict[str, float]]:
+        """Compute pairwise return correlations across strategies."""
+        strategy_ids = list(self._strategy_returns.keys())
+        n = len(strategy_ids)
+        if n == 0:
+            return {}
+
+        result: dict[str, dict[str, float]] = {}
+        for i, sid_i in enumerate(strategy_ids):
+            result[sid_i] = {}
+            for j, sid_j in enumerate(strategy_ids):
+                if i == j:
+                    result[sid_i][sid_j] = 1.0
+                    continue
+                rets_i = self._strategy_returns.get(sid_i, [])
+                rets_j = self._strategy_returns.get(sid_j, [])
+                min_len = min(len(rets_i), len(rets_j))
+                if min_len < 2:
+                    result[sid_i][sid_j] = 0.0
+                else:
+                    mean_i = sum(rets_i[-min_len:]) / min_len
+                    mean_j = sum(rets_j[-min_len:]) / min_len
+                    cov = sum(
+                        (rets_i[-min_len + k] - mean_i) * (rets_j[-min_len + k] - mean_j)
+                        for k in range(min_len)
+                    ) / min_len
+                    std_i = math.sqrt(sum((r - mean_i) ** 2 for r in rets_i[-min_len:]) / min_len)
+                    std_j = math.sqrt(sum((r - mean_j) ** 2 for r in rets_j[-min_len:]) / min_len)
+                    result[sid_i][sid_j] = cov / (std_i * std_j) if std_i * std_j > 0 else 0.0
+        return result
+
+    def get_strategy_risk_contribution(
+        self,
+        aggregated: AggregatedExposure,
+    ) -> dict[str, float]:
+        """Calculate each strategy's contribution to total portfolio risk."""
+        if not aggregated.strategy_exposures:
+            return {}
+
+        total_risk = sum(
+            abs(se.gross_exposure) * se.correlation_to_benchmark
+            for se in aggregated.strategy_exposures.values()
+        )
+
+        if total_risk == 0:
+            return {sid: 1.0 / len(aggregated.strategy_exposures) for sid in aggregated.strategy_exposures}
+
+        contributions: dict[str, float] = {}
+        for sid, se in aggregated.strategy_exposures.items():
+            risk_contrib = abs(se.gross_exposure) * se.correlation_to_benchmark
+            contributions[sid] = risk_contrib / total_risk
+
+        return contributions
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PF-05: Return Attribution Analysis
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass(slots=True)
+class AttributionResult:
+    """Result of return attribution analysis."""
+
+    attribution_id: str
+    total_return: float
+    return_contributions: dict[str, float]  # instrument/strategy -> contribution
+    sector_contributions: dict[str, float]  # sector -> contribution
+    allocation_effect: float  # return from weight changes
+    selection_effect: float  # return from asset selection
+    interaction_effect: float  # joint effect
+    active_return: float  # portfolio return - benchmark return
+    created_at: str = field(default_factory=_now)
+
+
+class AttributionAnalyzer:
+    """Performs return attribution analysis (PF-05).
+
+    Provides:
+    - Brinson attribution (allocation, selection, interaction effects)
+    - Sector attribution
+    - Factor attribution
+    - Contribution analysis
+    """
+
+    def __init__(self) -> None:
+        self._return_history: dict[str, list[float]] = defaultdict(list)
+        self._weight_history: dict[str, list[float]] = defaultdict(list)
+        self._benchmark_returns: list[float] = []
+
+    def record_period_return(self, instrument_id: str, return_pct: float) -> None:
+        """Record return for an instrument."""
+        self._return_history[instrument_id].append(return_pct)
+        if len(self._return_history[instrument_id]) > 252:
+            self._return_history[instrument_id] = self._return_history[instrument_id][-252:]
+
+    def record_period_weights(self, weights: dict[str, float]) -> None:
+        """Record portfolio weights at start of period."""
+        for iid, w in weights.items():
+            self._weight_history[iid].append(w)
+            if len(self._weight_history[iid]) > 252:
+                self._weight_history[iid] = self._weight_history[iid][-252:]
+
+    def record_benchmark_return(self, return_pct: float) -> None:
+        """Record benchmark return for the period."""
+        self._benchmark_returns.append(return_pct)
+        if len(self._benchmark_returns) > 252:
+            self._benchmark_returns = self._benchmark_returns[-252:]
+
+    def brinson_attribution(
+        self,
+        portfolio_weights: dict[str, float],
+        benchmark_weights: dict[str, float],
+        portfolio_returns: dict[str, float],
+        benchmark_returns: dict[str, float],
+    ) -> AttributionResult:
+        """Perform Brinson attribution analysis.
+
+        Breaks active return into:
+        - Allocation effect: return from overweighting/underweighting sectors
+        - Selection effect: return from picking assets within sectors
+        - Interaction effect: joint effect of allocation and selection
+        """
+        all_instruments = set(portfolio_weights.keys()) | set(benchmark_weights.keys())
+
+        allocation_effect = 0.0
+        selection_effect = 0.0
+        interaction_effect = 0.0
+        return_contributions: dict[str, float] = {}
+        sector_contributions: dict[str, float] = defaultdict(float)
+
+        for iid in all_instruments:
+            p_w = portfolio_weights.get(iid, 0.0)
+            b_w = benchmark_weights.get(iid, 0.0)
+            p_r = portfolio_returns.get(iid, 0.0)
+            b_r = benchmark_returns.get(iid, 0.0)
+
+            # Allocation effect: (Pw - Bw) * Br
+            alloc = (p_w - b_w) * b_r
+            allocation_effect += alloc
+
+            # Selection effect: Bw * (PwR - Br)
+            sel = b_w * (p_r - b_r)
+            selection_effect += sel
+
+            # Interaction effect: (Pw - Bw) * (PwR - Br)
+            interact = (p_w - b_w) * (p_r - b_r)
+            interaction_effect += interact
+
+            return_contributions[iid] = p_w * p_r
+
+        total_return = sum(return_contributions.values())
+        active_return = total_return - sum(benchmark_returns.get(iid, 0.0) * b_w for iid, b_w in benchmark_weights.items())
+
+        return AttributionResult(
+            attribution_id=f"attr:{uuid.uuid4().hex[:12]}",
+            total_return=total_return,
+            return_contributions=return_contributions,
+            sector_contributions=dict(sector_contributions),
+            allocation_effect=allocation_effect,
+            selection_effect=selection_effect,
+            interaction_effect=interaction_effect,
+            active_return=active_return,
+        )
+
+    def factor_attribution(
+        self,
+        instrument_factors: dict[str, dict[str, float]],
+        instrument_returns: dict[str, float],
+        factor_returns: dict[str, float],
+    ) -> dict[str, float]:
+        """Perform factor-based attribution.
+
+        Returns the contribution of each factor to total return.
+        """
+        factor_contributions: dict[str, float] = defaultdict(float)
+
+        for iid, factors in instrument_factors.items():
+            ret = instrument_returns.get(iid, 0.0)
+            for factor, beta in factors.items():
+                factor_ret = factor_returns.get(factor, 0.0)
+                factor_contributions[factor] += beta * factor_ret
+
+        return dict(factor_contributions)
+
+    def calculate_nav_attribution(
+        self,
+        positions: dict[str, float],
+        prices_start: dict[str, float],
+        prices_end: dict[str, float],
+        benchmark_return: float,
+    ) -> AttributionResult:
+        """Calculate NAV-based attribution (PF-05).
+
+        Returns contribution of each position to total PnL.
+        """
+        return_contributions: dict[str, float] = {}
+        total_return = 0.0
+
+        for iid, qty in positions.items():
+            start_price = prices_start.get(iid, 0.0)
+            end_price = prices_end.get(iid, start_price)
+
+            if start_price > 0:
+                position_return = (end_price - start_price) / start_price
+                position_pnl = qty * (end_price - start_price)
+                return_contributions[iid] = position_pnl
+                total_return += position_return
+
+        # Calculate active return vs benchmark
+        active_return = total_return - benchmark_return
+
+        return AttributionResult(
+            attribution_id=f"nav:{uuid.uuid4().hex[:12]}",
+            total_return=total_return,
+            return_contributions=return_contributions,
+            sector_contributions={},
+            allocation_effect=0.0,
+            selection_effect=active_return,
+            interaction_effect=0.0,
+            active_return=active_return,
+        )
+
+    def get_top_contributors(
+        self,
+        contributions: dict[str, float],
+        n: int = 5,
+    ) -> tuple[list[tuple[str, float]], list[tuple[str, float]]]:
+        """Get top N contributors and detractors."""
+        sorted_items = sorted(contributions.items(), key=lambda x: x[1], reverse=True)
+        return sorted_items[:n], sorted_items[-n:]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PF-06: Multi-Account Capital Allocation Interface
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass(slots=True)
+class Account:
+    """Represents a trading account."""
+
+    account_id: str
+    user_id: str
+    account_type: str  # primary, sub, mirror
+    parent_account_id: str | None
+    cash_balance: float
+    equity: float
+    margin_available: float
+    positions_value: float
+    created_at: str = field(default_factory=_now)
+
+
+@dataclass(slots=True)
+class TransferRequest:
+    """Request to transfer funds between accounts."""
+
+    transfer_id: str
+    from_account_id: str
+    to_account_id: str
+    amount: float
+    transfer_type: str  # manual, automatic, rebalance
+    status: str  # pending, completed, failed
+    created_at: str = field(default_factory=_now)
+    completed_at: str | None = None
+
+
+@dataclass(slots=True)
+class CapitalAllocationPlan:
+    """Multi-account capital allocation plan."""
+
+    plan_id: str
+    user_id: str
+    total_capital: float
+    account_allocations: dict[str, float]  # account_id -> amount
+    strategy_allocations: dict[str, dict[str, float]]  # account_id -> {strategy_id -> amount}
+    rebalance_threshold: float
+    created_at: str = field(default_factory=_now)
+
+
+class MultiAccountAllocator:
+    """Multi-account unified capital allocation interface (PF-06).
+
+    Provides:
+    - Account hierarchy management
+    - Cross-account fund transfers
+    - Unified capital allocation
+    - Automatic rebalancing across accounts
+    """
+
+    def __init__(self, persistence=None) -> None:
+        self.persistence = persistence
+        self._accounts: dict[str, Account] = {}
+        self._transfer_history: list[TransferRequest] = []
+        self._allocation_plans: dict[str, CapitalAllocationPlan] = {}
+        self._account_positions: dict[str, dict[str, float]] = defaultdict(dict)
+
+    def create_account(
+        self,
+        user_id: str,
+        account_type: str = "primary",
+        parent_account_id: str | None = None,
+        initial_cash: float = 0.0,
+    ) -> Account:
+        """Create a new account."""
+        account_id = f"acc:{uuid.uuid4().hex[:12]}"
+        account = Account(
+            account_id=account_id,
+            user_id=user_id,
+            account_type=account_type,
+            parent_account_id=parent_account_id,
+            cash_balance=initial_cash,
+            equity=initial_cash,
+            margin_available=initial_cash,
+            positions_value=0.0,
+        )
+        self._accounts[account_id] = account
+        return account
+
+    def get_account(self, account_id: str) -> Account | None:
+        """Get account by ID."""
+        return self._accounts.get(account_id)
+
+    def get_user_accounts(self, user_id: str) -> list[Account]:
+        """Get all accounts for a user."""
+        return [a for a in self._accounts.values() if a.user_id == user_id]
+
+    def get_child_accounts(self, parent_account_id: str) -> list[Account]:
+        """Get all child accounts of a parent account."""
+        return [
+            a for a in self._accounts.values()
+            if a.parent_account_id == parent_account_id
+        ]
+
+    def update_account_balance(
+        self,
+        account_id: str,
+        cash_delta: float,
+        positions_value: float,
+    ) -> Account | None:
+        """Update account cash and positions value."""
+        account = self._accounts.get(account_id)
+        if not account:
+            return None
+
+        account.cash_balance += cash_delta
+        account.equity = account.cash_balance + positions_value
+        account.positions_value = positions_value
+        account.margin_available = account.equity * 0.5  # Simplified margin calc
+        return account
+
+    def transfer_funds(
+        self,
+        from_account_id: str,
+        to_account_id: str,
+        amount: float,
+        transfer_type: str = "manual",
+    ) -> TransferRequest | None:
+        """Transfer funds between accounts."""
+        from_acc = self._accounts.get(from_account_id)
+        to_acc = self._accounts.get(to_account_id)
+
+        if not from_acc or not to_acc:
+            return None
+
+        if from_acc.cash_balance < amount:
+            return None
+
+        # Execute transfer
+        from_acc.cash_balance -= amount
+        to_acc.cash_balance += amount
+
+        transfer = TransferRequest(
+            transfer_id=f"tr:{uuid.uuid4().hex[:12]}",
+            from_account_id=from_account_id,
+            to_account_id=to_account_id,
+            amount=amount,
+            transfer_type=transfer_type,
+            status="completed",
+            completed_at=_now(),
+        )
+        self._transfer_history.append(transfer)
+        return transfer
+
+    def get_transfer_history(
+        self,
+        account_id: str | None = None,
+        limit: int = 50,
+    ) -> list[TransferRequest]:
+        """Get transfer history, optionally filtered by account."""
+        if account_id:
+            return [
+                t for t in self._transfer_history
+                if t.from_account_id == account_id or t.to_account_id == account_id
+            ][:limit]
+        return self._transfer_history[:limit]
+
+    def create_allocation_plan(
+        self,
+        user_id: str,
+        total_capital: float,
+        account_weights: dict[str, float],
+        rebalance_threshold: float = 0.05,
+    ) -> CapitalAllocationPlan:
+        """Create a capital allocation plan across accounts."""
+        plan_id = f"cap:{uuid.uuid4().hex[:12]}"
+        account_allocations = {
+            acc_id: total_capital * weight
+            for acc_id, weight in account_weights.items()
+        }
+
+        plan = CapitalAllocationPlan(
+            plan_id=plan_id,
+            user_id=user_id,
+            total_capital=total_capital,
+            account_allocations=account_allocations,
+            strategy_allocations={},
+            rebalance_threshold=rebalance_threshold,
+        )
+        self._allocation_plans[plan_id] = plan
+        return plan
+
+    def allocate_strategy_to_account(
+        self,
+        plan_id: str,
+        account_id: str,
+        strategy_id: str,
+        allocation_amount: float,
+    ) -> bool:
+        """Allocate strategy funding to a specific account."""
+        plan = self._allocation_plans.get(plan_id)
+        if not plan:
+            return False
+
+        if account_id not in plan.account_allocations:
+            return False
+
+        if plan.strategy_allocations.get(account_id) is None:
+            plan.strategy_allocations[account_id] = {}
+
+        plan.strategy_allocations[account_id][strategy_id] = allocation_amount
+        return True
+
+    def check_rebalance_needed(
+        self,
+        plan_id: str,
+        current_capitals: dict[str, float],
+    ) -> tuple[bool, list[str]]:
+        """Check if any account needs rebalancing."""
+        plan = self._allocation_plans.get(plan_id)
+        if not plan:
+            return False, []
+
+        needs_rebalance = []
+        for acc_id, target_amount in plan.account_allocations.items():
+            current = current_capitals.get(acc_id, 0.0)
+            drift = abs(current - target_amount) / target_amount if target_amount > 0 else 0.0
+            if drift > plan.rebalance_threshold:
+                needs_rebalance.append(acc_id)
+
+        return len(needs_rebalance) > 0, needs_rebalance
+
+    def execute_rebalance(
+        self,
+        plan_id: str,
+        current_capitals: dict[str, float],
+    ) -> list[TransferRequest]:
+        """Execute rebalancing transfers to bring accounts back to target."""
+        plan = self._allocation_plans.get(plan_id)
+        if not plan:
+            return []
+
+        transfers: list[TransferRequest] = []
+        total_current = sum(current_capitals.values())
+        total_target = sum(plan.account_allocations.values())
+
+        if abs(total_current - total_target) > 0.01:
+            return transfers
+
+        for acc_id, target_amount in plan.account_allocations.items():
+            current = current_capitals.get(acc_id, 0.0)
+            diff = target_amount - current
+
+            if abs(diff) < 1.0:  # Ignore tiny differences
+                continue
+
+            if diff > 0:
+                # Need to fund this account - find one with excess
+                for other_acc, other_current in current_capitals.items():
+                    if other_acc == acc_id:
+                        continue
+                    other_target = plan.account_allocations.get(other_acc, 0.0)
+                    excess = other_current - other_target
+                    if excess > 0:
+                        transfer_amount = min(diff, excess)
+                        transfer = self.transfer_funds(
+                            other_acc, acc_id, transfer_amount, "rebalance"
+                        )
+                        if transfer:
+                            transfers.append(transfer)
+                            diff -= transfer_amount
+                            current_capitals[acc_id] = current + transfer_amount
+                            current_capitals[other_acc] = other_current - transfer_amount
+                        if diff <= 0:
+                            break
+
+        return transfers
+
+    def get_account_summary(self, account_id: str) -> dict[str, Any] | None:
+        """Get comprehensive account summary."""
+        account = self._accounts.get(account_id)
+        if not account:
+            return None
+
+        child_accounts = self.get_child_accounts(account_id)
+        transfers = self.get_transfer_history(account_id, limit=10)
+
+        return {
+            "account_id": account.account_id,
+            "user_id": account.user_id,
+            "account_type": account.account_type,
+            "cash_balance": account.cash_balance,
+            "equity": account.equity,
+            "positions_value": account.positions_value,
+            "margin_available": account.margin_available,
+            "child_accounts": [c.account_id for c in child_accounts],
+            "recent_transfers": len(transfers),
+            "created_at": account.created_at,
+        }

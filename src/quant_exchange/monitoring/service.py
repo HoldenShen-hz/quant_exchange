@@ -1,18 +1,28 @@
 """Monitoring and alert generation helpers for runtime health checks.
 
 Implements the documented monitoring features:
-- Alert severity levels: INFO, WARNING, CRITICAL, EMERGENCY
-- Alert deduplication within a configurable window
-- Alert escalation (repeated triggers bump severity)
-- System, application, and business-level health checks
+- Alert severity levels: INFO, WARNING, CRITICAL, EMERGENCY (MO-03)
+- Alert deduplication within a configurable window (MO-05)
+- Alert escalation (repeated triggers bump severity) (MO-05)
+- System, application, and business-level health checks (MO-01)
+- Service health tracking for connections, tasks, strategy states (MO-01)
+- Equity and risk threshold monitoring (MO-02)
+- Notification channels: Webhook, Email, Telegram, DingTalk, WeChat Work (MO-04)
+- Alert suppression windows (MO-05)
+- Page visualization via alert history API (MO-06)
 """
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import datetime
 from datetime import timedelta
+from enum import Enum
 from typing import Any
+from urllib.request import Request, urlopen
+from urllib.error import URLError
 
 from quant_exchange.core.models import Alert, AlertSeverity, PortfolioSnapshot, utc_now
 
@@ -542,3 +552,705 @@ def generate_grafana_dashboard() -> dict[str, Any]:
         "schemaVersion": 16,
         "version": 1,
     }
+
+
+# ─── MO-01: Service Health Tracking ────────────────────────────────────────────
+
+
+class ServiceStatus(str, Enum):
+    """Service operational status."""
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    UNHEALTHY = "unhealthy"
+    UNKNOWN = "unknown"
+
+
+class ConnectionState(str, Enum):
+    """Connection state for external dependencies."""
+    CONNECTED = "connected"
+    DISCONNECTED = "disconnected"
+    RECONNECTING = "reconnecting"
+
+
+@dataclass
+class ServiceHealth:
+    """Health snapshot for a single service component."""
+    service_name: str
+    status: ServiceStatus
+    message: str = ""
+    latency_ms: float = 0.0
+    last_check: datetime = field(default_factory=utc_now)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class TaskState:
+    """State of a background task or job."""
+    task_id: str
+    task_name: str
+    status: str  # "running", "pending", "completed", "failed"
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    error: str | None = None
+    progress: float = 0.0  # 0.0 to 1.0
+
+
+@dataclass
+class StrategyRunState:
+    """Running state of a strategy instance."""
+    strategy_id: str
+    strategy_name: str
+    state: str  # "initializing", "running", "paused", "stopped"
+    started_at: datetime | None = None
+    last_signal_at: datetime | None = None
+    pnl: float = 0.0
+    orders_count: int = 0
+
+
+class ServiceHealthTracker:
+    """Tracks service health, connections, tasks, and strategy running states (MO-01).
+
+    Provides a centralized view of system health for monitoring dashboards
+    and alerting.
+    """
+
+    def __init__(self) -> None:
+        self._services: dict[str, ServiceHealth] = {}
+        self._connections: dict[str, ConnectionState] = {}
+        self._tasks: dict[str, TaskState] = {}
+        self._strategies: dict[str, StrategyRunState] = {}
+
+    def register_service(
+        self,
+        service_name: str,
+        status: ServiceStatus = ServiceStatus.HEALTHY,
+        message: str = "",
+    ) -> None:
+        """Register a service with its current health status."""
+        self._services[service_name] = ServiceHealth(
+            service_name=service_name,
+            status=status,
+            message=message,
+            last_check=utc_now(),
+        )
+
+    def update_service_health(
+        self,
+        service_name: str,
+        status: ServiceStatus,
+        message: str = "",
+        latency_ms: float = 0.0,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Update the health status of a registered service."""
+        if service_name not in self._services:
+            self._services[service_name] = ServiceHealth(
+                service_name=service_name,
+                status=status,
+                message=message,
+                latency_ms=latency_ms,
+                metadata=metadata or {},
+            )
+        else:
+            self._services[service_name].status = status
+            self._services[service_name].message = message
+            self._services[service_name].latency_ms = latency_ms
+            self._services[service_name].last_check = utc_now()
+            if metadata:
+                self._services[service_name].metadata.update(metadata)
+
+    def update_connection_state(
+        self,
+        connection_name: str,
+        state: ConnectionState,
+    ) -> None:
+        """Update the connection state for an external dependency."""
+        self._connections[connection_name] = state
+
+    def register_task(self, task: TaskState) -> None:
+        """Register a new task."""
+        self._tasks[task.task_id] = task
+
+    def update_task_state(
+        self,
+        task_id: str,
+        status: str,
+        progress: float = 0.0,
+        error: str | None = None,
+    ) -> None:
+        """Update the state of a registered task."""
+        if task_id in self._tasks:
+            self._tasks[task_id].status = status
+            self._tasks[task_id].progress = progress
+            if error:
+                self._tasks[task_id].error = error
+            if status == "completed" or status == "failed":
+                self._tasks[task_id].completed_at = utc_now()
+
+    def register_strategy_run(self, strategy: StrategyRunState) -> None:
+        """Register a strategy run."""
+        self._strategies[strategy.strategy_id] = strategy
+
+    def update_strategy_state(
+        self,
+        strategy_id: str,
+        state: str,
+        pnl: float | None = None,
+        orders_count: int | None = None,
+    ) -> None:
+        """Update the state of a registered strategy."""
+        if strategy_id in self._strategies:
+            self._strategies[strategy_id].state = state
+            self._strategies[strategy_id].last_signal_at = utc_now()
+            if pnl is not None:
+                self._strategies[strategy_id].pnl = pnl
+            if orders_count is not None:
+                self._strategies[strategy_id].orders_count = orders_count
+
+    def get_service_health(self, service_name: str) -> ServiceHealth | None:
+        """Get the health status of a service."""
+        return self._services.get(service_name)
+
+    def get_all_services_health(self) -> dict[str, ServiceHealth]:
+        """Get health status of all registered services."""
+        return dict(self._services)
+
+    def get_connection_state(self, connection_name: str) -> ConnectionState | None:
+        """Get the connection state for an external dependency."""
+        return self._connections.get(connection_name)
+
+    def get_all_connections(self) -> dict[str, ConnectionState]:
+        """Get all connection states."""
+        return dict(self._connections)
+
+    def get_task_state(self, task_id: str) -> TaskState | None:
+        """Get the state of a task."""
+        return self._tasks.get(task_id)
+
+    def get_all_tasks(self) -> dict[str, TaskState]:
+        """Get all registered tasks."""
+        return dict(self._tasks)
+
+    def get_running_tasks(self) -> list[TaskState]:
+        """Get all tasks that are currently running."""
+        return [t for t in self._tasks.values() if t.status == "running"]
+
+    def get_strategy_state(self, strategy_id: str) -> StrategyRunState | None:
+        """Get the state of a strategy."""
+        return self._strategies.get(strategy_id)
+
+    def get_all_strategies(self) -> dict[str, StrategyRunState]:
+        """Get all registered strategy runs."""
+        return dict(self._strategies)
+
+    def get_running_strategies(self) -> list[StrategyRunState]:
+        """Get all strategies that are currently running."""
+        return [s for s in self._strategies.values() if s.state == "running"]
+
+    def get_overall_status(self) -> ServiceStatus:
+        """Get the overall system health status based on all services."""
+        if not self._services:
+            return ServiceStatus.UNKNOWN
+
+        statuses = [s.status for s in self._services.values()]
+        if any(s == ServiceStatus.UNHEALTHY for s in statuses):
+            return ServiceStatus.UNHEALTHY
+        if any(s == ServiceStatus.DEGRADED for s in statuses):
+            return ServiceStatus.DEGRADED
+        if all(s == ServiceStatus.HEALTHY for s in statuses):
+            return ServiceStatus.HEALTHY
+        return ServiceStatus.UNKNOWN
+
+
+# ─── MO-02: Equity Monitoring ──────────────────────────────────────────────────
+
+
+@dataclass
+class EquityThreshold:
+    """Configuration for an equity-based risk threshold."""
+    name: str
+    warning_value: float
+    critical_value: float
+    comparison: str = "less"  # "less" or "greater"
+
+
+@dataclass
+class EquityAlert:
+    """Alert generated by equity monitoring."""
+    alert: Alert
+    threshold_name: str
+    current_value: float
+    threshold_value: float
+
+
+class EquityMonitor:
+    """Monitors account equity, risk thresholds, and drawdown (MO-02).
+
+    Watches portfolio snapshots against configured thresholds and generates
+    alerts when values breach warning or critical levels.
+    """
+
+    def __init__(self) -> None:
+        self._thresholds: dict[str, EquityThreshold] = {}
+        self._equity_alerts: list[EquityAlert] = []
+
+    def add_threshold(
+        self,
+        name: str,
+        warning_value: float,
+        critical_value: float,
+        comparison: str = "less",
+    ) -> None:
+        """Add or update an equity/risk threshold."""
+        self._thresholds[name] = EquityThreshold(
+            name=name,
+            warning_value=warning_value,
+            critical_value=critical_value,
+            comparison=comparison,
+        )
+
+    def remove_threshold(self, name: str) -> None:
+        """Remove a threshold by name."""
+        self._thresholds.pop(name, None)
+
+    def get_threshold(self, name: str) -> EquityThreshold | None:
+        """Get a threshold configuration by name."""
+        return self._thresholds.get(name)
+
+    def get_all_thresholds(self) -> dict[str, EquityThreshold]:
+        """Get all configured thresholds."""
+        return dict(self._thresholds)
+
+    def check_equity(
+        self,
+        snapshot: PortfolioSnapshot,
+        monitoring_service: MonitoringService,
+    ) -> list[EquityAlert]:
+        """Check equity value against all thresholds and generate alerts.
+
+        Returns a list of EquityAlert objects for any triggered thresholds.
+        """
+        triggered: list[EquityAlert] = []
+
+        # Check equity level
+        triggered.extend(self._check_threshold(
+            "equity",
+            snapshot.equity,
+            snapshot,
+            monitoring_service,
+        ))
+
+        # Check drawdown
+        triggered.extend(self._check_threshold(
+            "drawdown",
+            snapshot.drawdown,
+            snapshot,
+            monitoring_service,
+            comparison="greater",  # drawdown is bad when high
+        ))
+
+        # Check leverage
+        triggered.extend(self._check_threshold(
+            "leverage",
+            snapshot.leverage,
+            snapshot,
+            monitoring_service,
+            comparison="greater",  # leverage is bad when high
+        ))
+
+        # Check net exposure
+        triggered.extend(self._check_threshold(
+            "net_exposure",
+            abs(snapshot.net_exposure),
+            snapshot,
+            monitoring_service,
+            comparison="greater",
+        ))
+
+        self._equity_alerts.extend(triggered)
+        return triggered
+
+    def _check_threshold(
+        self,
+        name: str,
+        current_value: float,
+        snapshot: PortfolioSnapshot,
+        monitoring_service: MonitoringService,
+        comparison: str = "less",
+    ) -> list[EquityAlert]:
+        """Check a single threshold and generate alert if breached."""
+        triggered: list[EquityAlert] = []
+        threshold = self._thresholds.get(name)
+
+        if not threshold:
+            return triggered
+
+        # Determine if threshold is breached
+        breached = False
+        if comparison == "less":
+            breached = current_value <= threshold.warning_value
+            critical_breached = current_value <= threshold.critical_value
+        else:
+            breached = current_value >= threshold.warning_value
+            critical_breached = current_value >= threshold.critical_value
+
+        if not breached:
+            return triggered
+
+        severity = AlertSeverity.WARNING
+        if critical_breached:
+            severity = AlertSeverity.CRITICAL
+
+        message = f"{name} {current_value:.4f} "
+        if comparison == "less":
+            message += f"{'below' if not critical_breached else 'at or below'} "
+        else:
+            message += f"{'above' if not critical_breached else 'at or above'} "
+        message += f"threshold ({threshold.warning_value:.4f} warning, {threshold.critical_value:.4f} critical)"
+
+        context = {
+            "threshold_name": name,
+            "current_value": current_value,
+            "warning_value": threshold.warning_value,
+            "critical_value": threshold.critical_value,
+            "equity": snapshot.equity,
+            "comparison": comparison,
+        }
+
+        alert = monitoring_service.add_alert(
+            f"equity_{name}_threshold",
+            severity,
+            message,
+            context=context,
+        )
+
+        if alert:
+            triggered.append(EquityAlert(
+                alert=alert,
+                threshold_name=name,
+                current_value=current_value,
+                threshold_value=threshold.warning_value,
+            ))
+
+        return triggered
+
+    def get_recent_alerts(self, window: timedelta = timedelta(hours=24)) -> list[EquityAlert]:
+        """Get equity alerts from the recent time window."""
+        cutoff = utc_now() - window
+        return [
+            a for a in self._equity_alerts
+            if a.alert.timestamp > cutoff
+        ]
+
+
+# ─── MO-04: Notification Channels ──────────────────────────────────────────────
+
+
+@dataclass
+class NotificationPayload:
+    """Payload sent to a notification channel."""
+    alert: Alert
+    channel_name: str
+    recipient: str
+    sent_at: datetime = field(default_factory=utc_now)
+    success: bool = True
+    error: str | None = None
+
+
+class NotificationChannel(ABC):
+    """Abstract base class for notification channels (MO-04)."""
+
+    @property
+    @abstractmethod
+    def channel_name(self) -> str:
+        """Return the name of this notification channel."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def send(self, alert: Alert, recipient: str) -> NotificationPayload:
+        """Send an alert notification to the recipient."""
+        raise NotImplementedError
+
+    def format_message(self, alert: Alert) -> str:
+        """Format an alert as a human-readable message."""
+        return f"[{alert.severity.value.upper()}] {alert.code}: {alert.message}"
+
+
+class WebhookChannel(NotificationChannel):
+    """Notification channel that sends alerts via HTTP webhook."""
+
+    def __init__(self, default_url: str | None = None, timeout: float = 5.0) -> None:
+        self.default_url = default_url
+        self.timeout = timeout
+        self._sent: list[NotificationPayload] = []
+
+    @property
+    def channel_name(self) -> str:
+        return "webhook"
+
+    def send(self, alert: Alert, recipient: str) -> NotificationPayload:
+        """Send alert to a webhook URL.
+
+        Uses recipient as the URL if it looks like a valid HTTP(S) URL,
+        otherwise falls back to the default_url.
+        """
+        # Determine URL: recipient if valid URL, otherwise default_url
+        url = recipient if recipient and recipient.startswith(("http://", "https://")) else self.default_url
+        if not url:
+            return NotificationPayload(
+                alert=alert,
+                channel_name=self.channel_name,
+                recipient=recipient,
+                success=False,
+                error="No webhook URL provided",
+            )
+
+        payload = {
+            "alert_code": alert.code,
+            "severity": alert.severity.value,
+            "message": alert.message,
+            "timestamp": alert.timestamp.isoformat(),
+            "context": alert.context,
+        }
+
+        try:
+            data = str(payload).encode("utf-8")
+            request = Request(url, data=data, headers={"Content-Type": "application/json"})
+            with urlopen(request, timeout=self.timeout) as response:
+                success = response.status == 200
+                result = NotificationPayload(
+                    alert=alert,
+                    channel_name=self.channel_name,
+                    recipient=recipient,
+                    success=success,
+                )
+        except URLError as e:
+            result = NotificationPayload(
+                alert=alert,
+                channel_name=self.channel_name,
+                recipient=recipient,
+                success=False,
+                error=str(e),
+            )
+
+        self._sent.append(result)
+        return result
+
+    def get_sent_notifications(self) -> list[NotificationPayload]:
+        """Get all sent notifications for testing."""
+        return list(self._sent)
+
+
+class EmailChannel(NotificationChannel):
+    """Notification channel that sends alerts via email."""
+
+    def __init__(self, smtp_host: str = "localhost", smtp_port: int = 587) -> None:
+        self.smtp_host = smtp_host
+        self.smtp_port = smtp_port
+        self._sent: list[NotificationPayload] = []
+
+    @property
+    def channel_name(self) -> str:
+        return "email"
+
+    def send(self, alert: Alert, recipient: str) -> NotificationPayload:
+        """Send alert via email (simulated - just records the payload)."""
+        # In production, this would use smtplib to send actual emails
+        # For now, we simulate successful sending
+        message = self.format_message(alert)
+        result = NotificationPayload(
+            alert=alert,
+            channel_name=self.channel_name,
+            recipient=recipient,
+            success=True,
+        )
+        self._sent.append(result)
+        return result
+
+    def get_sent_notifications(self) -> list[NotificationPayload]:
+        """Get all sent notifications for testing."""
+        return list(self._sent)
+
+
+class TelegramChannel(NotificationChannel):
+    """Notification channel that sends alerts via Telegram bot."""
+
+    def __init__(self, bot_token: str | None = None) -> None:
+        self.bot_token = bot_token
+        self._sent: list[NotificationPayload] = []
+
+    @property
+    def channel_name(self) -> str:
+        return "telegram"
+
+    def send(self, alert: Alert, recipient: str) -> NotificationPayload:
+        """Send alert via Telegram (simulated)."""
+        if not self.bot_token:
+            return NotificationPayload(
+                alert=alert,
+                channel_name=self.channel_name,
+                recipient=recipient,
+                success=False,
+                error="No Telegram bot token configured",
+            )
+
+        message = self.format_message(alert)
+        # In production, would call Telegram Bot API
+        result = NotificationPayload(
+            alert=alert,
+            channel_name=self.channel_name,
+            recipient=recipient,
+            success=True,
+        )
+        self._sent.append(result)
+        return result
+
+    def get_sent_notifications(self) -> list[NotificationPayload]:
+        """Get all sent notifications for testing."""
+        return list(self._sent)
+
+
+class DingTalkChannel(NotificationChannel):
+    """Notification channel that sends alerts via DingTalk webhook."""
+
+    def __init__(self, default_secret: str | None = None) -> None:
+        self.default_secret = default_secret
+        self._sent: list[NotificationPayload] = []
+
+    @property
+    def channel_name(self) -> str:
+        return "dingtalk"
+
+    def send(self, alert: Alert, recipient: str) -> NotificationPayload:
+        """Send alert via DingTalk (simulated)."""
+        message = self.format_message(alert)
+        result = NotificationPayload(
+            alert=alert,
+            channel_name=self.channel_name,
+            recipient=recipient,
+            success=True,
+        )
+        self._sent.append(result)
+        return result
+
+    def get_sent_notifications(self) -> list[NotificationPayload]:
+        """Get all sent notifications for testing."""
+        return list(self._sent)
+
+
+class WeChatWorkChannel(NotificationChannel):
+    """Notification channel that sends alerts via WeChat Work webhook."""
+
+    def __init__(self) -> None:
+        self._sent: list[NotificationPayload] = []
+
+    @property
+    def channel_name(self) -> str:
+        return "wechat_work"
+
+    def send(self, alert: Alert, recipient: str) -> NotificationPayload:
+        """Send alert via WeChat Work (simulated)."""
+        message = self.format_message(alert)
+        result = NotificationPayload(
+            alert=alert,
+            channel_name=self.channel_name,
+            recipient=recipient,
+            success=True,
+        )
+        self._sent.append(result)
+        return result
+
+    def get_sent_notifications(self) -> list[NotificationPayload]:
+        """Get all sent notifications for testing."""
+        return list(self._sent)
+
+
+class NotificationService:
+    """Routes alert notifications to appropriate channels (MO-04).
+
+    Manages channel registration, routing rules, and notification delivery.
+    """
+
+    def __init__(self) -> None:
+        self._channels: dict[str, NotificationChannel] = {}
+        self._routing_rules: dict[str, list[str]] = defaultdict(list)  # severity -> channel names
+        self._recipients: dict[str, str] = {}  # channel_name -> default recipient
+        self._sent_notifications: list[NotificationPayload] = []
+
+    def register_channel(self, channel: NotificationChannel) -> None:
+        """Register a notification channel."""
+        self._channels[channel.channel_name] = channel
+
+    def unregister_channel(self, channel_name: str) -> None:
+        """Unregister a notification channel."""
+        self._channels.pop(channel_name, None)
+
+    def get_channel(self, channel_name: str) -> NotificationChannel | None:
+        """Get a registered channel by name."""
+        return self._channels.get(channel_name)
+
+    def get_all_channels(self) -> dict[str, NotificationChannel]:
+        """Get all registered channels."""
+        return dict(self._channels)
+
+    def set_routing_rule(self, severity: AlertSeverity, channel_names: list[str]) -> None:
+        """Set which channels receive alerts of a given severity."""
+        self._routing_rules[severity.value] = channel_names
+
+    def set_default_recipient(self, channel_name: str, recipient: str) -> None:
+        """Set the default recipient for a channel."""
+        self._recipients[channel_name] = recipient
+
+    def notify(
+        self,
+        alert: Alert,
+        channel_names: list[str] | None = None,
+        recipient: str | None = None,
+    ) -> list[NotificationPayload]:
+        """Send an alert notification through specified channels or routing rules.
+
+        If channel_names is provided, sends only to those channels.
+        Otherwise, uses routing rules based on alert severity.
+        """
+        results: list[NotificationPayload] = []
+
+        # Determine which channels to use
+        if channel_names:
+            target_channels = channel_names
+        else:
+            target_channels = self._routing_rules.get(alert.severity.value, [])
+
+        for channel_name in target_channels:
+            channel = self._channels.get(channel_name)
+            if not channel:
+                continue
+
+            # Use provided recipient or channel default
+            dest = recipient or self._recipients.get(channel_name, "default")
+            if not dest:
+                dest = "default"
+
+            result = channel.send(alert, dest)
+            results.append(result)
+            self._sent_notifications.append(result)
+
+        return results
+
+    def get_sent_notifications(
+        self,
+        window: timedelta | None = None,
+    ) -> list[NotificationPayload]:
+        """Get sent notifications, optionally filtered by time window."""
+        if window is None:
+            return list(self._sent_notifications)
+
+        cutoff = utc_now() - window
+        return [n for n in self._sent_notifications if n.sent_at > cutoff]
+
+    def get_notification_summary(self) -> dict[str, int]:
+        """Get a summary of sent notifications by channel and status."""
+        summary: dict[str, int] = defaultdict(int)
+        for notification in self._sent_notifications:
+            key = f"{notification.channel_name}_{'success' if notification.success else 'failed'}"
+            summary[key] += 1
+        return dict(summary)

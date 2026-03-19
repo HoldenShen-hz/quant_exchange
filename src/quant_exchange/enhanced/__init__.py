@@ -188,6 +188,7 @@ from .multi_account import (
 )
 from .portfolio_allocators import (
     AllocatorConfig,
+    AllocatorType,
     AllocationResult,
     PortfolioAllocation,
     PortfolioAllocatorService,
