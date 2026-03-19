@@ -1,0 +1,915 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Quant Exchange Terminal</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <div class="brand-row">
+            <p class="eyebrow">Quant Exchange Stocks</p>
+            <span class="hero-badge">App Style Workbench</span>
+          </div>
+          <h1>全球交易研究终端</h1>
+          <p class="hero-copy">
+            参考主流交易 App 的首页、自选、选股、F10、图表和数据页布局，统一呈现 A 股、港股、美股与加密货币的观察、实时行情、K 线、财务分析、对比、历史下载、模拟交易，以及适合新手快速入门的学习中心。
+          </p>
+          <div class="hero-chip-row" aria-label="支持市场">
+            <span class="hero-chip">A股</span>
+            <span class="hero-chip">港股</span>
+            <span class="hero-chip">美股</span>
+            <span class="hero-chip">加密货币</span>
+            <span class="hero-chip">个股详情</span>
+            <span class="hero-chip">实时快照</span>
+            <span class="hero-chip">历史下载</span>
+            <span class="hero-chip">新手课程</span>
+          </div>
+        </div>
+        <div class="topbar-meta">
+          <div class="meta-card">
+            <span class="meta-label">访问地址</span>
+            <p id="workspace-url">访问地址：正在加载...</p>
+          </div>
+          <div class="meta-card">
+            <span class="meta-label">工作区状态</span>
+            <p id="workspace-status">正在恢复你之前的筛股和图表设置...</p>
+          </div>
+          <div class="meta-card count-card">
+            <span class="meta-label">当前股票池</span>
+            <strong id="stock-count">0</strong>
+            <span class="meta-note">A / H / US 全市场主数据目录</span>
+          </div>
+          <div class="meta-card">
+            <span class="meta-label">行情引擎</span>
+            <p id="market-runtime-status">后台行情流正在启动...</p>
+          </div>
+          <div class="meta-card auth-card">
+            <span class="meta-label">用户空间</span>
+            <div id="auth-summary" class="auth-summary">当前未登录，将按当前浏览器单独保存设置。</div>
+            <form id="auth-form" class="auth-form">
+              <label>
+                <span>用户名</span>
+                <input id="auth-username" type="text" placeholder="请输入用户名" />
+              </label>
+              <label>
+                <span>密码</span>
+                <input id="auth-password" type="password" placeholder="请输入密码" />
+              </label>
+              <label>
+                <span>显示名</span>
+                <input id="auth-display-name" type="text" placeholder="注册时可选填写" />
+              </label>
+              <div class="auth-actions">
+                <button class="primary-button" type="button" id="auth-login">登录</button>
+                <button class="ghost-button" type="button" id="auth-register">注册</button>
+              </div>
+            </form>
+            <button class="ghost-button" type="button" id="auth-logout" style="display:none;">退出登录</button>
+          </div>
+        </div>
+      </header>
+
+      <nav class="workspace-tabs" aria-label="主功能导航">
+        <button class="tab-button is-active" type="button" data-tab="overview">首页</button>
+        <button class="tab-button" type="button" data-tab="learning">学习</button>
+        <button class="tab-button" type="button" data-tab="watchlist">自选</button>
+        <button class="tab-button" type="button" data-tab="screener">选股</button>
+        <button class="tab-button" type="button" data-tab="research">个股</button>
+        <button class="tab-button" type="button" data-tab="crypto">加密</button>
+        <button class="tab-button" type="button" data-tab="futures">期货</button>
+        <button class="tab-button" type="button" data-tab="compare">对比</button>
+        <button class="tab-button" type="button" data-tab="paper">模拟</button>
+        <button class="tab-button" type="button" data-tab="downloads">数据</button>
+        <button class="tab-button" type="button" data-tab="activity">动态</button>
+      </nav>
+
+      <main class="workspace-panels">
+        <section class="tab-panel is-active" data-tab-panel="overview">
+          <section class="panel home-hero-panel">
+            <div class="section-head">
+              <div>
+                <h2>首页总览</h2>
+                <p>按主流交易 App 的首页节奏组织入口，先看市场，再进自选、选股和研究。</p>
+              </div>
+            </div>
+            <div class="quick-entry-grid">
+              <button class="quick-entry-card" type="button" data-tab="learning">
+                <strong>学习中心</strong>
+                <span>从知识库、学习计划到课程测验，快速搭起金融与量化基础</span>
+              </button>
+              <button class="quick-entry-card" type="button" data-tab="watchlist">
+                <strong>自选</strong>
+                <span>查看观察池、快速打开股票、准备对比组合</span>
+              </button>
+              <button class="quick-entry-card" type="button" data-tab="screener">
+                <strong>选股</strong>
+                <span>按市场、板块、财务指标和 F10 文本筛选股票</span>
+              </button>
+              <button class="quick-entry-card" type="button" data-tab="research">
+                <strong>个股详情</strong>
+                <span>K线图表、F10研究、五档盘口、成交明细一站式查看</span>
+              </button>
+              <button class="quick-entry-card" type="button" data-tab="crypto">
+                <strong>加密货币</strong>
+                <span>查看 24x7 币种行情、币种结构、走势和研究摘要</span>
+              </button>
+              <button class="quick-entry-card" type="button" data-tab="compare">
+                <strong>对比</strong>
+                <span>并排比较估值、成长、现金流和 F10 摘要</span>
+              </button>
+              <button class="quick-entry-card" type="button" data-tab="paper">
+                <strong>模拟交易</strong>
+                <span>提交模拟订单，查看持仓、成交和策略偏差摘要</span>
+              </button>
+              <button class="quick-entry-card" type="button" data-tab="downloads">
+                <strong>数据中心</strong>
+                <span>查看历史下载进度，继续、暂停或停止任务</span>
+              </button>
+            </div>
+          </section>
+
+          <section class="market-pulse-panel">
+            <div class="section-head">
+              <h2>市场脉搏</h2>
+              <p>参考主流交易 App 首页的市场总览和涨跌分布卡片</p>
+            </div>
+            <div id="market-pulse" class="market-pulse-grid"></div>
+          </section>
+
+          <section class="panel">
+            <div class="section-head">
+              <h2>行业热力图</h2>
+              <p>按行业板块展示涨跌分布，面积代表股票数量</p>
+            </div>
+            <div id="sector-heatmap" class="sector-heatmap"></div>
+          </section>
+
+          <section class="panel">
+            <div class="section-head">
+              <h2>市场情绪</h2>
+              <p>基于舆情分析和市场信号的方向性偏差研判</p>
+            </div>
+            <div id="sentiment-panel" class="market-pulse-grid">
+              <div class="pulse-card">
+                <h3>综合情绪</h3>
+                <strong id="sentiment-score">-</strong>
+                <p id="sentiment-label">等待数据加载</p>
+              </div>
+              <div class="pulse-card">
+                <h3>方向偏差</h3>
+                <strong id="bias-direction">-</strong>
+                <p id="bias-confidence">等待数据加载</p>
+              </div>
+              <div class="pulse-card">
+                <h3>情报数量</h3>
+                <strong id="intel-count">0</strong>
+                <p id="intel-latest">暂无最新情报</p>
+              </div>
+            </div>
+          </section>
+
+          <div class="overview-grid">
+            <section class="panel">
+              <div class="section-head">
+                <h2>筛股预设</h2>
+                <p>快速切到质量、股息、成长和价值风格</p>
+              </div>
+              <div id="preset-buttons" class="preset-grid"></div>
+            </section>
+
+            <section class="panel">
+              <div class="section-head">
+                <h2>研究焦点</h2>
+                <p>首页显示当前选中的股票，便于从市场总览快速进入研究</p>
+              </div>
+              <div id="focus-card" class="focus-card empty-state">
+                选中一只股票后，这里会显示当前关注标的的价格、状态和财务概览。
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="section-head">
+                <h2>使用路径</h2>
+                <p>把常见研究流程拆成类似交易 App 的连续步骤</p>
+              </div>
+              <div class="insight-list">
+                <div class="insight-item">
+                  <strong>1. 先看市场</strong>
+                  <span>在首页先看涨跌分布、活跃股和市场节奏。</span>
+                </div>
+                <div class="insight-item">
+                  <strong>2. 再进选股</strong>
+                  <span>用财务、行业、概念和 F10 条件构建候选池。</span>
+                </div>
+                <div class="insight-item">
+                  <strong>3. 深入 F10 / 图表</strong>
+                  <span>切到 F10 和图表页，验证基本面与走势是否匹配。</span>
+                </div>
+                <div class="insight-item">
+                  <strong>4. 对比与下载</strong>
+                  <span>在对比页做横向比较，在数据页跟踪历史下载任务。</span>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="tab-panel" data-tab-panel="learning">
+          <section class="panel learning-hero-panel">
+            <div class="section-head">
+              <div>
+                <h2>新手学习中心</h2>
+                <p>先建立知识库，再看学习计划，接着逐课学习，最后用测验检验掌握程度。</p>
+              </div>
+              <div class="head-actions">
+                <a class="ghost-button" href="/learn">独立打开学习页</a>
+              </div>
+            </div>
+            <div id="learning-overview" class="learning-overview-grid"></div>
+          </section>
+
+          <div class="learning-grid">
+            <section class="panel">
+              <div class="section-head">
+                <div>
+                  <h2>知识库</h2>
+                  <p>覆盖金融、财经、货币、市场、股票、期货、区块链、交易、保险、银行与监管体系。</p>
+                </div>
+                <div class="head-actions learning-head-actions">
+                  <input
+                    id="learning-knowledge-search"
+                    class="learning-search-input"
+                    type="search"
+                    placeholder="搜索术语、主题或关键字"
+                    autocomplete="off"
+                  />
+                </div>
+              </div>
+              <div id="learning-knowledge-summary" class="learning-knowledge-summary meta-note"></div>
+              <div id="learning-knowledge-base" class="learning-knowledge-grid"></div>
+            </section>
+
+            <section class="panel">
+              <div class="section-head">
+                <h2>学习计划</h2>
+                <p>用短阶段推进，不求一次学全，但要求每一步都能落地。</p>
+              </div>
+              <div id="learning-study-plan" class="learning-plan-list"></div>
+            </section>
+          </div>
+
+          <div class="learning-grid learning-content-grid">
+            <section class="panel">
+              <div class="section-head">
+                <h2>课程目录</h2>
+                <p>按顺序学，也可以按错题反馈单独复习。</p>
+              </div>
+              <div id="learning-lesson-nav" class="learning-lesson-nav"></div>
+            </section>
+
+            <section class="panel">
+              <div class="section-head">
+                <h2>学习内容</h2>
+                <p id="learning-content-status">正在加载课程内容...</p>
+              </div>
+              <div id="learning-content" class="learning-content empty-state">
+                正在整理课程内容，请稍候。
+              </div>
+            </section>
+          </div>
+
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <h2>学习检验</h2>
+                <p>完成一轮课程后提交测验，错题会自动提示你回看哪一课。</p>
+              </div>
+            </div>
+            <form id="learning-quiz-form" class="learning-quiz-form">
+              <div id="learning-quiz" class="learning-quiz empty-state">正在加载测验题库...</div>
+              <div class="learning-quiz-actions">
+                <button class="primary-button" type="submit">提交测验</button>
+              </div>
+            </form>
+            <div id="learning-quiz-result" class="learning-quiz-result empty-state">
+              提交后，这里会显示得分、错题解释和建议复习章节。
+            </div>
+          </section>
+        </section>
+
+        <section class="tab-panel" data-tab-panel="watchlist">
+          <div class="subpanel-grid">
+            <section class="panel">
+              <div class="section-head">
+                <h2>自选列表</h2>
+                <p>像交易 App 的自选页一样，集中查看你重点跟踪的股票。</p>
+              </div>
+              <div id="watchlist-list" class="watchlist-list empty-state">
+                还没有加入自选的股票。
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="section-head">
+                <h2>对比托盘</h2>
+                <p id="compare-status">先在列表中选择两只股票</p>
+              </div>
+              <div id="compare-tray" class="compare-tray empty-state">
+                点击列表中的左右按钮后，这里会显示当前对比组合。
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="tab-panel" data-tab-panel="screener">
+          <section class="panel screener-panel">
+            <div class="section-head">
+              <div>
+                <h2>智能选股器</h2>
+                <p id="result-summary">正在加载全市场股票池...</p>
+              </div>
+              <div class="head-actions">
+                <button id="reset-filters" class="ghost-button" type="button">重置筛选</button>
+              </div>
+            </div>
+
+            <form id="filters-form" class="filters-grid">
+              <label class="wide">
+                <span>全局检索</span>
+                <input id="query" name="query" type="text" placeholder="代码 / 名称 / 关键词，例如：腾讯 / MSFT / 品牌龙头" />
+              </label>
+              <label class="wide">
+                <span>F10 文本</span>
+                <input id="f10_query" name="f10_query" type="text" placeholder="主营业务 / 竞争优势 / 风险提示，例如：云服务 / 高股息 / 品牌龙头" />
+              </label>
+              <label>
+                <span>市场</span>
+                <select id="market_region" name="market_region">
+                  <option value="">全部</option>
+                </select>
+              </label>
+              <label>
+                <span>交易所</span>
+                <select id="exchange_code" name="exchange_code">
+                  <option value="">全部</option>
+                </select>
+              </label>
+              <label>
+                <span>板块</span>
+                <select id="board" name="board">
+                  <option value="">全部</option>
+                </select>
+              </label>
+              <label>
+                <span>行业</span>
+                <select id="sector" name="sector">
+                  <option value="">全部</option>
+                </select>
+              </label>
+              <label>
+                <span>细分行业</span>
+                <select id="industry" name="industry">
+                  <option value="">全部</option>
+                </select>
+              </label>
+              <label>
+                <span>概念标签</span>
+                <select id="concept" name="concept">
+                  <option value="">全部</option>
+                </select>
+              </label>
+              <label>
+                <span>涨跌幅下限%</span>
+                <input id="min_change_pct" name="min_change_pct" type="number" step="0.1" />
+              </label>
+              <label>
+                <span>涨跌幅上限%</span>
+                <input id="max_change_pct" name="max_change_pct" type="number" step="0.1" />
+              </label>
+              <label>
+                <span>PE 上限</span>
+                <input id="max_pe_ttm" name="max_pe_ttm" type="number" step="0.1" />
+              </label>
+              <label>
+                <span>PE 下限</span>
+                <input id="min_pe_ttm" name="min_pe_ttm" type="number" step="0.1" />
+              </label>
+              <label>
+                <span>PB 上限</span>
+                <input id="max_pb" name="max_pb" type="number" step="0.1" />
+              </label>
+              <label>
+                <span>PB 下限</span>
+                <input id="min_pb" name="min_pb" type="number" step="0.1" />
+              </label>
+              <label>
+                <span>ROE 下限</span>
+                <input id="min_roe" name="min_roe" type="number" step="0.1" />
+              </label>
+              <label>
+                <span>毛利率下限%</span>
+                <input id="min_gross_margin" name="min_gross_margin" type="number" step="0.1" />
+              </label>
+              <label>
+                <span>营收增速下限</span>
+                <input id="min_revenue_growth" name="min_revenue_growth" type="number" step="0.1" />
+              </label>
+              <label>
+                <span>净利润增速下限</span>
+                <input id="min_net_profit_growth" name="min_net_profit_growth" type="number" step="0.1" />
+              </label>
+              <label>
+                <span>净利率下限</span>
+                <input id="min_net_margin" name="min_net_margin" type="number" step="0.1" />
+              </label>
+              <label>
+                <span>经营现金流增速下限</span>
+                <input id="min_operating_cashflow_growth" name="min_operating_cashflow_growth" type="number" step="0.1" />
+              </label>
+              <label>
+                <span>自由现金流率下限</span>
+                <input id="min_free_cashflow_margin" name="min_free_cashflow_margin" type="number" step="0.1" />
+              </label>
+              <label>
+                <span>流动比率下限</span>
+                <input id="min_current_ratio" name="min_current_ratio" type="number" step="0.1" />
+              </label>
+              <label>
+                <span>资产负债率上限</span>
+                <input id="max_debt_to_asset" name="max_debt_to_asset" type="number" step="0.1" />
+              </label>
+              <label>
+                <span>股息率下限</span>
+                <input id="min_dividend_yield" name="min_dividend_yield" type="number" step="0.1" />
+              </label>
+              <label>
+                <span>市值下限</span>
+                <input id="min_market_cap" name="min_market_cap" type="number" step="0.1" />
+              </label>
+              <label>
+                <span>市值上限</span>
+                <input id="max_market_cap" name="max_market_cap" type="number" step="0.1" />
+              </label>
+              <div class="actions">
+                <button type="submit" class="primary-button">执行筛选</button>
+              </div>
+            </form>
+
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>观察</th>
+                    <th data-sort-key="symbol">代码 <span class="sort-arrow">▲</span></th>
+                    <th data-sort-key="company_name">名称 <span class="sort-arrow">▲</span></th>
+                    <th data-sort-key="market_region">市场 <span class="sort-arrow">▲</span></th>
+                    <th data-sort-key="last_price">最新价 <span class="sort-arrow">▼</span></th>
+                    <th data-sort-key="change_pct">涨跌幅% <span class="sort-arrow">▼</span></th>
+                    <th data-sort-key="amplitude">振幅% <span class="sort-arrow">▼</span></th>
+                    <th data-sort-key="volume">成交量 <span class="sort-arrow">▼</span></th>
+                    <th data-sort-key="turnover">成交额 <span class="sort-arrow">▼</span></th>
+                    <th data-sort-key="market_cap">总市值 <span class="sort-arrow">▼</span></th>
+                    <th data-sort-key="sector">行业 <span class="sort-arrow">▲</span></th>
+                    <th data-sort-key="pe_ttm">PE <span class="sort-arrow">▼</span></th>
+                    <th data-sort-key="pb">PB <span class="sort-arrow">▼</span></th>
+                    <th data-sort-key="roe">ROE% <span class="sort-arrow">▼</span></th>
+                    <th data-sort-key="revenue_growth">营收增速% <span class="sort-arrow">▼</span></th>
+                    <th data-sort-key="net_profit_growth">净利增速% <span class="sort-arrow">▼</span></th>
+                    <th data-sort-key="gross_margin">毛利率% <span class="sort-arrow">▼</span></th>
+                    <th data-sort-key="net_margin">净利率% <span class="sort-arrow">▼</span></th>
+                    <th data-sort-key="dividend_yield">股息率% <span class="sort-arrow">▼</span></th>
+                    <th data-sort-key="debt_to_asset">资产负债率% <span class="sort-arrow">▼</span></th>
+                    <th>对比</th>
+                  </tr>
+                </thead>
+                <tbody id="stock-table-body"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section class="tab-panel" data-tab-panel="research">
+          <!-- === 顶部：股票价格头部（同花顺风格） === -->
+          <section class="panel stock-header-panel" id="stock-header-panel">
+            <div id="stock-header" class="stock-header empty-state">
+              在选股或自选列表中点击一只股票，即可查看完整的个股详情页。
+            </div>
+          </section>
+
+          <!-- === 中间：图表 + 侧边栏（三栏） === -->
+          <section class="panel stock-main-panel">
+            <div class="stock-main-layout">
+              <!-- 左侧：最近访问 -->
+              <aside class="stock-sidebar stock-sidebar-left" id="stock-recent-sidebar">
+                <h4>最近访问</h4>
+                <div id="stock-recent-list" class="stock-recent-list">
+                  <div class="empty-state" style="font-size:12px;padding:8px">暂无访问记录</div>
+                </div>
+              </aside>
+
+              <!-- 中间：K线图 + 快捷交易 -->
+              <div class="stock-chart-main">
+                <div class="section-head chart-head">
+                  <div>
+                    <p id="chart-status">点击股票后加载最近一段日线走势</p>
+                  </div>
+                  <div class="chart-controls">
+                    <div id="chart-range-buttons" class="chip-row"></div>
+                    <div id="chart-mode-buttons" class="chip-row"></div>
+                  </div>
+                </div>
+                <div id="kline-card" class="kline-card empty-state">
+                  选择一只股票后，这里会展示历史日线 K 线图和区间统计。
+                </div>
+                <div class="quick-trade-bar" id="quick-trade-bar">
+                  <span id="quick-trade-symbol" class="quick-trade-symbol">未选中标的</span>
+                  <span id="quick-trade-price" class="quick-trade-price">-</span>
+                  <input id="quick-trade-qty" type="number" min="1" step="100" value="100" placeholder="数量" style="width:80px" />
+                  <button class="primary-button" type="button" id="quick-buy-btn" style="background:linear-gradient(135deg,#3fb950,#2ea043);padding:8px 16px;">买入</button>
+                  <button class="primary-button" type="button" id="quick-sell-btn" style="background:linear-gradient(135deg,#f85149,#da3633);padding:8px 16px;">卖出</button>
+                </div>
+              </div>
+
+              <!-- 右侧：五档盘口 + 成交明细 -->
+              <aside class="stock-sidebar stock-sidebar-right" id="stock-orderbook-sidebar">
+                <div class="orderbook-panel">
+                  <h4>五档盘口</h4>
+                  <div id="stock-orderbook" class="stock-orderbook">
+                    <table class="orderbook-table">
+                      <tbody id="orderbook-asks"></tbody>
+                      <tr class="orderbook-mid"><td colspan="3" id="orderbook-mid-price">-</td></tr>
+                      <tbody id="orderbook-bids"></tbody>
+                    </table>
+                  </div>
+                </div>
+                <div class="trade-detail-panel">
+                  <h4>成交明细</h4>
+                  <div id="stock-trade-ticks" class="stock-trade-ticks">
+                    <div class="empty-state" style="font-size:12px;padding:8px">暂无成交</div>
+                  </div>
+                </div>
+              </aside>
+            </div>
+          </section>
+
+          <!-- === 下方：F10 子标签页（同花顺风格多标签） === -->
+          <section class="panel stock-f10-panel">
+            <nav class="stock-sub-tabs" id="stock-sub-tabs">
+              <button class="sub-tab-btn is-active" type="button" data-subtab="overview">首页概览</button>
+              <button class="sub-tab-btn" type="button" data-subtab="finance">财务分析</button>
+              <button class="sub-tab-btn" type="button" data-subtab="business">经营分析</button>
+              <button class="sub-tab-btn" type="button" data-subtab="shareholders">股东股本</button>
+              <button class="sub-tab-btn" type="button" data-subtab="news">公司大事</button>
+              <button class="sub-tab-btn" type="button" data-subtab="valuation">价值分析</button>
+            </nav>
+            <div id="detail-card" class="detail-card empty-state">
+              选择一只股票后，这里会展示 F10 摘要、主营业务、竞争优势、风险提示和财务分析。
+            </div>
+          </section>
+        </section>
+
+        <section class="tab-panel" data-tab-panel="crypto">
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <h2>加密货币市场</h2>
+                <p id="crypto-result-summary">正在加载加密货币市场概览...</p>
+              </div>
+            </div>
+            <div id="crypto-overview" class="market-pulse-grid"></div>
+          </section>
+
+          <div class="subpanel-grid">
+            <section class="panel">
+              <div class="section-head">
+                <div>
+                  <h2>币种列表</h2>
+                  <p>使用内置加密市场适配器展示 24x7 研究视图。</p>
+                </div>
+              </div>
+              <div id="crypto-watchlist" class="watchlist-list empty-state">
+                正在加载加密货币列表。
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="section-head">
+                <h2>币种详情</h2>
+                <p>点击左侧列表查看摘要、用途、风险和实时指标。</p>
+              </div>
+              <div id="crypto-detail-card" class="detail-card empty-state">
+                选择一只加密货币后，这里会展示市场摘要、用途、风险和关键交易参数。
+              </div>
+            </section>
+          </div>
+
+          <section class="panel chart-panel">
+            <div class="section-head chart-head">
+              <div>
+                <h2>加密货币 K 线图</h2>
+                <p id="crypto-chart-status">点击币种后加载最近一段走势</p>
+              </div>
+              <div class="chart-controls">
+                <div id="crypto-chart-range-buttons" class="chip-row"></div>
+                <div id="crypto-chart-mode-buttons" class="chip-row"></div>
+              </div>
+            </div>
+            <div id="crypto-kline-card" class="kline-card empty-state">
+              选择一只加密货币后，这里会展示最近一段走势和区间统计。
+            </div>
+          </section>
+        </section>
+
+        <section class="tab-panel" data-tab-panel="futures">
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <h2>期货市场</h2>
+                <p id="futures-result-summary">正在加载期货市场概览...</p>
+              </div>
+            </div>
+            <div id="futures-overview" class="market-pulse-grid"></div>
+          </section>
+
+          <div class="subpanel-grid">
+            <section class="panel">
+              <div class="section-head">
+                <div>
+                  <h2>合约列表</h2>
+                  <p>股指、商品、能源和贵金属期货合约。</p>
+                </div>
+              </div>
+              <div id="futures-watchlist" class="watchlist-list empty-state">
+                正在加载期货合约列表。
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="section-head">
+                <h2>合约详情</h2>
+                <p>点击左侧列表查看合约规格、保证金和到期信息。</p>
+              </div>
+              <div id="futures-detail-card" class="detail-card empty-state">
+                选择一个期货合约后，这里会展示合约摘要、规格、保证金要求和交易参数。
+              </div>
+            </section>
+          </div>
+
+          <section class="panel chart-panel">
+            <div class="section-head chart-head">
+              <div>
+                <h2>期货 K 线图</h2>
+                <p id="futures-chart-status">点击合约后加载最近一段走势</p>
+              </div>
+              <div class="chart-controls">
+                <div id="futures-chart-range-buttons" class="chip-row"></div>
+                <div id="futures-chart-mode-buttons" class="chip-row"></div>
+              </div>
+            </div>
+            <div id="futures-kline-card" class="kline-card empty-state">
+              选择一个期货合约后，这里会展示历史走势和区间统计。
+            </div>
+          </section>
+        </section>
+
+        <section class="tab-panel" data-tab-panel="compare">
+          <section class="panel">
+            <div class="section-head">
+              <h2>对比托盘</h2>
+              <p>从筛股列表中为左右两侧各选择一只股票</p>
+            </div>
+            <div class="compare-tray">
+              <div id="compare-tab-summary" class="compare-card empty-state">当前还没有完成双股票选择。</div>
+            </div>
+          </section>
+
+          <section class="panel compare-panel">
+            <div class="section-head">
+              <h2>双股票财务对比</h2>
+              <p>对比估值、成长、现金流、偿债和摘要</p>
+            </div>
+            <div id="compare-card" class="compare-card empty-state">
+              选择左侧和右侧股票后，将展示估值、成长、现金流、偿债和 F10 摘要对比。
+            </div>
+          </section>
+        </section>
+
+        <section class="tab-panel" data-tab-panel="paper">
+          <section class="panel paper-panel">
+            <div class="section-head">
+              <div>
+                <h2>模拟交易</h2>
+                <p>用仿真账户验证下单、成交、风控、持仓和策略信号偏差。</p>
+              </div>
+              <div class="head-actions">
+                <button id="paper-refresh" class="ghost-button" type="button">刷新账户</button>
+                <button id="paper-reset" class="ghost-button" type="button">重置账户</button>
+              </div>
+            </div>
+            <div id="paper-account-overview" class="paper-overview-grid"></div>
+            <div class="paper-grid">
+              <div id="paper-donut" class="paper-card" style="padding:14px;text-align:center;">
+                <div class="empty-state" style="min-height:120px">暂无持仓数据</div>
+              </div>
+              <div id="paper-equity-curve" class="paper-card" style="padding:14px;">
+                <div class="empty-state" style="min-height:80px">交易后将显示资金曲线</div>
+              </div>
+            </div>
+            <div class="paper-grid">
+              <section class="paper-card">
+                <div class="section-head">
+                  <div>
+                    <h3>下单面板</h3>
+                    <p>基于当前选中的股票发起模拟订单。</p>
+                  </div>
+                </div>
+                <form id="paper-order-form" class="paper-order-grid">
+                  <label class="wide">
+                    <span>当前标的</span>
+                    <div id="paper-current-instrument" class="inline-badge empty-badge">请先在选股、自选或 F10 页选择一只股票</div>
+                  </label>
+                  <label>
+                    <span>方向</span>
+                    <select id="paper-order-side" name="side">
+                      <option value="buy">买入</option>
+                      <option value="sell">卖出</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>订单类型</span>
+                    <select id="paper-order-type" name="order_type">
+                      <option value="market">市价</option>
+                      <option value="limit">限价</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>数量</span>
+                    <input id="paper-order-quantity" name="quantity" type="number" min="1" step="1" value="100" />
+                  </label>
+                  <label>
+                    <span>限价</span>
+                    <input id="paper-order-limit-price" name="limit_price" type="number" min="0" step="0.01" placeholder="限价单时填写" />
+                  </label>
+                  <div class="actions">
+                    <button id="paper-submit-order" type="submit" class="primary-button">提交模拟订单</button>
+                  </div>
+                </form>
+                <div id="paper-order-feedback" class="paper-feedback empty-badge">下单结果会显示在这里。</div>
+              </section>
+
+              <section class="paper-card">
+                <div class="section-head">
+                  <div>
+                    <h3>策略偏差摘要</h3>
+                    <p>比较当前模拟仓位和策略信号，观察模拟盘与研究结果的偏差。</p>
+                  </div>
+                </div>
+                <div id="paper-strategy-diff" class="paper-diff empty-state">
+                  选择股票后，这里会显示当前模拟仓位与策略目标仓位的差异摘要。
+                </div>
+              </section>
+            </div>
+
+            <div class="paper-grid">
+              <section class="paper-card">
+                <div class="section-head">
+                  <div>
+                    <h3>当前持仓</h3>
+                    <p>查看模拟账户的持仓、浮盈亏和仓位权重。</p>
+                  </div>
+                </div>
+                <div id="paper-positions" class="paper-list empty-state">当前还没有模拟持仓。</div>
+              </section>
+
+              <section class="paper-card">
+                <div class="section-head">
+                  <div>
+                    <h3>订单与成交</h3>
+                    <p>展示最近的模拟订单、状态变化和成交流水。</p>
+                  </div>
+                </div>
+                <div id="paper-orders" class="paper-list empty-state">当前还没有模拟订单。</div>
+                <div id="paper-fills" class="paper-list empty-state">当前还没有模拟成交。</div>
+              </section>
+            </div>
+          </section>
+        </section>
+
+        <section class="tab-panel" data-tab-panel="downloads">
+          <section class="panel">
+            <div class="section-head">
+              <h2>风控仪表盘</h2>
+              <p>实时展示风险控制状态和监控指标</p>
+            </div>
+            <div id="risk-dashboard" class="market-pulse-grid">
+              <div class="pulse-card risk-indicator" id="risk-kill-switch">
+                <h3>杀开关</h3>
+                <strong class="risk-normal">OFF</strong>
+                <p>系统正常运行</p>
+              </div>
+              <div class="pulse-card risk-indicator" id="risk-leverage">
+                <h3>杠杆率</h3>
+                <strong>-</strong>
+                <p>等待数据</p>
+              </div>
+              <div class="pulse-card risk-indicator" id="risk-drawdown">
+                <h3>最大回撤</h3>
+                <strong>-</strong>
+                <p>等待数据</p>
+              </div>
+              <div class="pulse-card risk-indicator" id="risk-alerts">
+                <h3>活跃告警</h3>
+                <strong>0</strong>
+                <p>无告警</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="download-hub-panel">
+            <div class="section-head">
+              <div>
+                <h2>历史数据下载中心</h2>
+                <p id="download-hub-status">正在加载历史数据下载任务状态...</p>
+              </div>
+              <div class="head-actions">
+                <button id="refresh-download-jobs" class="ghost-button" type="button">刷新状态</button>
+              </div>
+            </div>
+            <div id="download-overview" class="download-overview-grid"></div>
+            <div id="download-jobs" class="download-job-grid"></div>
+          </section>
+        </section>
+
+        <section class="tab-panel" data-tab-panel="activity">
+          <section class="panel bot-panel">
+            <div class="section-head">
+              <div>
+                <h2>策略机器人</h2>
+                <p>参考 FMZ 的 Bot 管理方式，为当前股票快速创建、启动、暂停和交互。</p>
+              </div>
+            </div>
+            <div id="bot-overview" class="bot-overview-grid"></div>
+            <form id="bot-create-form" class="bot-create-grid">
+              <label>
+                <span>当前标的</span>
+                <div id="bot-current-instrument" class="inline-badge empty-badge">请先在选股或自选页选择一只股票</div>
+              </label>
+              <label>
+                <span>策略模板</span>
+                <select id="bot-template-select" name="template_code"></select>
+              </label>
+              <label>
+                <span>机器人名称</span>
+                <input id="bot-name" name="bot_name" type="text" placeholder="例如：茅台趋势机器人 / 腾讯防守机器人" />
+              </label>
+              <div class="actions">
+                <button id="create-bot" type="submit" class="primary-button">创建机器人</button>
+              </div>
+            </form>
+            <div id="bot-list" class="bot-list empty-state">
+              当前还没有策略机器人，选择一只股票后可以从模板快速创建。
+            </div>
+          </section>
+
+          <section class="panel notifications-panel">
+            <div class="section-head">
+              <h2>通知中心</h2>
+              <p>汇总机器人启动、暂停、参数更新、清仓等交互消息。</p>
+            </div>
+            <div id="notification-list" class="notification-list empty-state">
+              当前还没有机器人通知。
+            </div>
+          </section>
+
+          <section class="panel activity-panel">
+            <div class="section-head">
+              <h2>最近操作记录</h2>
+              <p>系统自动记录你的筛股、看图、对比和机器人交互行为</p>
+            </div>
+            <div id="activity-log" class="activity-log empty-state">
+              打开页面后，这里会展示最近的浏览、筛股和对比记录。
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+    <nav class="bottom-dock" aria-label="底部标签页">
+      <button class="dock-button is-active" type="button" data-tab="overview">首页</button>
+      <button class="dock-button" type="button" data-tab="learning">学习</button>
+      <button class="dock-button" type="button" data-tab="watchlist">自选</button>
+      <button class="dock-button" type="button" data-tab="screener">选股</button>
+      <button class="dock-button" type="button" data-tab="research">个股</button>
+      <button class="dock-button" type="button" data-tab="crypto">加密</button>
+      <button class="dock-button" type="button" data-tab="futures">期货</button>
+      <button class="dock-button" type="button" data-tab="compare">对比</button>
+      <button class="dock-button" type="button" data-tab="paper">模拟</button>
+      <button class="dock-button" type="button" data-tab="downloads">数据</button>
+      <button class="dock-button" type="button" data-tab="activity">动态</button>
+    </nav>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

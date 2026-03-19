@@ -1,0 +1,16 @@
+[project]
+name = "quant-exchange"
+version = "0.1.0"
+description = "A documented MVP quant trading platform for research, backtesting, execution, and risk control."
+readme = "doc/README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [
+  { name = "Codex" }
+]
+dependencies = [
+  "baostock>=0.8.9",
+]
+
+[tool.unittest]
+test-command = "python -m unittest discover -s tests -t . -v"

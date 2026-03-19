@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m unittest discover -s tests -t . -v)",
+      "Bash(python3 -m unittest discover -s tests -t . -v)",
+      "Bash(python -m pytest tests/ -x --tb=short)",
+      "Bash(python3 -m pytest tests/ -x --tb=short)",
+      "Bash(source .venv_data/bin/activate)",
+      "Bash(pip install:*)",
+      "Bash(find /Users/holden/Project/finance_devepment/quant_exchange/src -type f \\\\\\(-name *.py -o -name *.ts -o -name *.tsx \\\\\\))",
+      "Bash(find /Users/holden/Project/finance_devepment/quant_exchange/src/quant_exchange -name \"*.py\" -type f -exec wc -l {} +)",
+      "WebSearch",
+      "Bash(source ../../.venv_data/bin/activate)",
+      "Bash(find /Users/holden/Project/finance_devepment/quant_exchange -path */runtime/history_downloads/* -type f)",
+      "Bash(kill 94414)",
+      "Bash(rm -f /Users/holden/Project/finance_devepment/quant_exchange/data/runtime/history_downloads/hk_equity_daily_history.* /Users/holden/Project/finance_devepment/quant_exchange/data/runtime/history_downloads/us_equity_daily_history.*)",
+      "Bash(rm -rf /Users/holden/Project/finance_devepment/quant_exchange/data/hk_equities/daily_raw /Users/holden/Project/finance_devepment/quant_exchange/data/us_equities/daily_raw)",
+      "Bash(curl -s http://127.0.0.1:8080/api/history-downloads)",
+      "Bash(python3 -c \":*)",
+      "Bash(curl -v http://127.0.0.1:8080/)",
+      "Bash(curl -s -X POST http://127.0.0.1:8080/api/history-downloads/start -H 'Content-Type: application/json' -d '{\"\"\"\"job_id\"\"\"\":\"\"\"\"hk_equity_daily_history\"\"\"\"}')",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(''''HK start:'''', d[''''code'''']\\)\")",
+      "Bash(curl -s -X POST http://127.0.0.1:8080/api/history-downloads/start -H 'Content-Type: application/json' -d '{\"\"\"\"job_id\"\"\"\":\"\"\"\"us_equity_daily_history\"\"\"\"}')",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(''''US start:'''', d[''''code'''']\\)\")",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(''''Server OK, jobs:'''', len\\(d[''''data'''']\\)\\)\")",
+      "Bash(PYTHONPATH=src python -c \":*)",
+      "Bash(kill 7451)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\(''src/quant_exchange/stocks/service.py''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
+      "Bash(curl -s http://127.0.0.1:8080/api/stocks?limit=5)",
+      "Bash(curl -s http://127.0.0.1:8080/api/stocks/count)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(f''''Stocks: {len\\(d[\"\"data\"\"]\\)}''''\\)\")",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(f''''Total: {d[\"\"data\"\"][\"\"count\"\"]}''''\\)\")"
+    ]
+  }
+}
