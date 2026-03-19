@@ -89,6 +89,7 @@ class CapitalGain:
     """A realized capital gain/loss."""
 
     gain_id: str
+    sale_activity_id: str
     account_id: str
     instrument_id: str
     gain_type: GainType
@@ -349,6 +350,7 @@ class TaxReportingService:
 
         capital_gain = CapitalGain(
             gain_id=f"gain:{uuid.uuid4().hex[:12]}",
+            sale_activity_id=sale_activity.activity_id,
             account_id=sale_activity.account_id,
             instrument_id=sale_activity.instrument_id,
             gain_type=gain_type,
@@ -372,10 +374,9 @@ class TaxReportingService:
         """Get capital gains with filters."""
         results = []
         for g in self._gains:
-            # Get the user/account from activity if needed
+            # Get the user/account from sale activity
             if user_id or account_id:
-                # Find matching activity
-                matching = [a for a in self._activities if a.activity_id == g.gain_id[:16]]
+                matching = [a for a in self._activities if a.activity_id == g.sale_activity_id]
                 if not matching:
                     continue
                 act = matching[0]

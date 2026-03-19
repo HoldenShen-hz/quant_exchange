@@ -405,11 +405,11 @@ class SocialService:
 
     def get_followers(self, user_id: str) -> list[str]:
         """Get list of user IDs following this user."""
-        return [f for f, _ in self._follows if f == user_id]
+        return [f for f, _ in self._follows if _ == user_id]
 
     def get_following(self, user_id: str) -> list[str]:
         """Get list of user IDs this user is following."""
-        return [t for _, t in self._follows if _ == user_id]
+        return [t for f, t in self._follows if f == user_id]
 
     def get_followers_of_user(self, user_id: str) -> list[UserProfile]:
         """Get profiles of users following this user."""
