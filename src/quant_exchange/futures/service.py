@@ -1,16 +1,297 @@
-"""Futures market summaries, details, and chart payloads for the web UI."""
+"""Futures market summaries, details, and chart payloads for the web UI.
+
+FT-08: Trading calendar and session periods (day/night sessions)
+FT-09: Main contract and continuous contract mapping (rollover logic)
+FT-10: Futures simulated trading (order, position, mark-to-market, margin)
+FT-11: Unified cross-market portfolio view (futures/stocks/crypto)
+"""
 
 from __future__ import annotations
 
 import math
+import uuid
 from collections import Counter
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, time
 from statistics import pstdev
 from typing import Any, Callable
 
 from quant_exchange.adapters.registry import AdapterRegistry
-from quant_exchange.core.models import Instrument, Kline, utc_now
+from quant_exchange.core.models import Instrument, Kline, MarketType, utc_now
 from quant_exchange.marketdata.service import MarketDataStore
+
+
+# Trading session definitions for different market regions
+_TRADING_SESSIONS: dict[str, list[dict[str, str]]] = {
+    "中金所": [
+        {"session": "day", "start": "09:30", "end": "11:30", "label": "日盘"},
+        {"session": "night", "start": "13:00", "end": "15:00", "label": "日盘"},
+    ],
+    "上期所": [
+        {"session": "day", "start": "09:00", "end": "10:15", "label": "日盘"},
+        {"session": "day", "start": "10:30", "end": "11:30", "label": "日盘"},
+        {"session": "night", "start": "21:00", "end": "01:00", "label": "夜盘"},
+    ],
+    "CME": [
+        {"session": "electronic", "start": "17:00", "end": "16:00", "label": "电子盘"},
+    ],
+    "NYMEX": [
+        {"session": "electronic", "start": "18:00", "end": "17:00", "label": "电子盘"},
+    ],
+    "COMEX": [
+        {"session": "electronic", "start": "18:00", "end": "17:00", "label": "电子盘"},
+    ],
+}
+
+# Main contract aliases for continuous contract mapping (FT-09)
+_MAIN_CONTRACT_ALIASES: dict[str, str] = {
+    "IF": "IF2506",  # CSI 300 main contract
+    "IC": "IC2506",  # CSI 500 main contract
+    "IH": "IH2506",  # SSE 50 main contract
+    "AU": "AU2506",  # Gold main contract
+    "CU": "CU2506",  # Copper main contract
+    "RB": "RB2510",  # Rebar main contract
+    "ES": "ES2506",  # E-mini S&P 500 main contract
+    "NQ": "NQ2506",  # E-mini Nasdaq main contract
+    "CL": "CL2506",  # WTI Crude main contract
+    "GC": "GC2506",  # Gold main contract (COMEX)
+}
+
+# Continuous contract mappings (rollover logic)
+_CONTINUOUS_CONTRACTS: dict[str, list[str]] = {
+    "IF": ["IF2503", "IF2506", "IF2509"],
+    "IC": ["IC2503", "IC2506", "IC2509"],
+    "IH": ["IH2503", "IH2506", "IH2509"],
+    "AU": ["AU2504", "AU2506", "AU2508"],
+    "CU": ["CU2504", "CU2506", "CU2508"],
+    "RB": ["RB2506", "RB2510", "RB2512"],
+    "ES": ["ES2506", "ES2509", "ES2512"],
+    "NQ": ["NQ2506", "NQ2509", "NQ2512"],
+    "CL": ["CL2506", "CL2507", "CL2508"],
+    "GC": ["GC2506", "GC2508", "GC2510"],
+}
+
+
+@dataclass
+class FuturesPosition:
+    """Represents a futures position for simulated trading (FT-10)."""
+    instrument_id: str
+    direction: str  # "long" or "short"
+    quantity: int
+    entry_price: float
+    current_price: float
+    contract_multiplier: float
+    margin_used: float
+    unrealized_pnl: float
+    realized_pnl: float
+    updated_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass
+class FuturesOrder:
+    """Represents a futures order for simulated trading (FT-10)."""
+    order_id: str
+    instrument_id: str
+    direction: str
+    order_type: str  # "market" or "limit"
+    quantity: int
+    limit_price: float | None
+    filled_quantity: int
+    avg_fill_price: float
+    status: str  # "submitted", "filled", "partial", "cancelled", "rejected"
+    created_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass
+class FuturesAccount:
+    """Represents a futures trading account for mark-to-market (FT-10)."""
+    account_code: str
+    initial_equity: float
+    current_equity: float
+    cash_available: float
+    margin_used: float
+    positions: dict[str, FuturesPosition] = field(default_factory=dict)
+    orders: dict[str, FuturesOrder] = field(default_factory=dict)
+    daily_pnl: float = 0.0
+    daily_realized_pnl: float = 0.0
+
+
+class FuturesTradingService:
+    """Futures simulated trading service (FT-10)."""
+
+    def __init__(self) -> None:
+        self._accounts: dict[str, FuturesAccount] = {}
+        self._positions: dict[str, FuturesPosition] = {}
+        self._orders: dict[str, FuturesOrder] = {}
+
+    def get_or_create_account(self, account_code: str, initial_equity: float = 1000000.0) -> FuturesAccount:
+        """Get or create a futures trading account."""
+        if account_code not in self._accounts:
+            self._accounts[account_code] = FuturesAccount(
+                account_code=account_code,
+                initial_equity=initial_equity,
+                current_equity=initial_equity,
+                cash_available=initial_equity,
+                margin_used=0.0,
+            )
+        return self._accounts[account_code]
+
+    def submit_order(
+        self,
+        account_code: str,
+        instrument_id: str,
+        direction: str,
+        quantity: int,
+        order_type: str = "market",
+        limit_price: float | None = None,
+        contract_multiplier: float = 1.0,
+    ) -> FuturesOrder:
+        """Submit a futures order (FT-10)."""
+        account = self.get_or_create_account(account_code)
+
+        # Calculate margin required
+        price = limit_price if order_type == "limit" else self._get_current_price(instrument_id)
+        margin_required = price * quantity * contract_multiplier * 0.12  # 12% initial margin
+
+        if margin_required > account.cash_available:
+            order = FuturesOrder(
+                order_id=str(uuid.uuid4())[:8],
+                instrument_id=instrument_id,
+                direction=direction,
+                order_type=order_type,
+                quantity=quantity,
+                limit_price=limit_price,
+                filled_quantity=0,
+                avg_fill_price=0.0,
+                status="rejected",
+            )
+            account.orders[order.order_id] = order
+            return order
+
+        order = FuturesOrder(
+            order_id=str(uuid.uuid4())[:8],
+            instrument_id=instrument_id,
+            direction=direction,
+            order_type=order_type,
+            quantity=quantity,
+            limit_price=limit_price,
+            filled_quantity=quantity,
+            avg_fill_price=price,
+            status="filled",
+        )
+
+        account.orders[order.order_id] = order
+        account.cash_available -= margin_required
+        account.margin_used += margin_required
+
+        # Update or create position
+        self._update_position(account, instrument_id, direction, quantity, price, contract_multiplier)
+
+        return order
+
+    def _update_position(
+        self,
+        account: FuturesAccount,
+        instrument_id: str,
+        direction: str,
+        quantity: int,
+        price: float,
+        contract_multiplier: float,
+    ) -> None:
+        """Update futures position after order fill (FT-10)."""
+        pos_key = f"{instrument_id}_{direction}"
+        if pos_key in account.positions:
+            pos = account.positions[pos_key]
+            total_qty = pos.quantity + quantity
+            pos.entry_price = (pos.entry_price * pos.quantity + price * quantity) / total_qty
+            pos.quantity = total_qty
+            pos.current_price = price
+            pos.unrealized_pnl = self._calculate_pnl(pos, price)
+            pos.updated_at = utc_now()
+        else:
+            pos = FuturesPosition(
+                instrument_id=instrument_id,
+                direction=direction,
+                quantity=quantity,
+                entry_price=price,
+                current_price=price,
+                contract_multiplier=contract_multiplier,
+                margin_used=price * quantity * contract_multiplier * 0.12,
+                unrealized_pnl=0.0,
+                realized_pnl=0.0,
+            )
+            account.positions[pos_key] = pos
+
+        self._positions[pos_key] = account.positions[pos_key]
+
+    def _calculate_pnl(self, pos: FuturesPosition, current_price: float) -> float:
+        """Calculate unrealized PnL for a position (FT-10)."""
+        if pos.direction == "long":
+            return (current_price - pos.entry_price) * pos.quantity * pos.contract_multiplier
+        else:
+            return (pos.entry_price - current_price) * pos.quantity * pos.contract_multiplier
+
+    def _get_current_price(self, instrument_id: str) -> float:
+        """Get current price for a futures contract (simplified simulation)."""
+        return 4000.0  # Simplified - would use market data store
+
+    def mark_to_market(self, account_code: str, instrument_id: str, current_price: float) -> dict[str, Any]:
+        """Mark positions to market price and update account equity (FT-10)."""
+        account = self.get_or_create_account(account_code)
+        total_unrealized = 0.0
+
+        for pos_key, pos in list(account.positions.items()):
+            if instrument_id in pos_key:
+                old_pnl = pos.unrealized_pnl
+                pos.current_price = current_price
+                pos.unrealized_pnl = self._calculate_pnl(pos, current_price)
+                delta = pos.unrealized_pnl - old_pnl
+                total_unrealized += delta
+                pos.updated_at = utc_now()
+
+        account.current_equity = account.initial_equity + account.daily_realized_pnl + total_unrealized
+        return {
+            "account_code": account_code,
+            "current_equity": account.current_equity,
+            "daily_pnl": total_unrealized,
+            "margin_used": account.margin_used,
+        }
+
+    def get_positions(self, account_code: str) -> list[dict[str, Any]]:
+        """Get all positions for an account (FT-10)."""
+        account = self.get_or_create_account(account_code)
+        return [
+            {
+                "instrument_id": pos.instrument_id,
+                "direction": pos.direction,
+                "quantity": pos.quantity,
+                "entry_price": pos.entry_price,
+                "current_price": pos.current_price,
+                "unrealized_pnl": pos.unrealized_pnl,
+                "realized_pnl": pos.realized_pnl,
+                "margin_used": pos.margin_used,
+            }
+            for pos in account.positions.values()
+        ]
+
+    def get_dashboard(self, account_code: str) -> dict[str, Any]:
+        """Get futures trading dashboard summary (FT-10)."""
+        account = self.get_or_create_account(account_code)
+        positions = self.get_positions(account_code)
+        total_unrealized = sum(p["unrealized_pnl"] for p in positions)
+        total_realized = sum(p["realized_pnl"] for p in positions)
+        return {
+            "account_code": account_code,
+            "initial_equity": account.initial_equity,
+            "current_equity": account.current_equity,
+            "cash_available": account.cash_available,
+            "margin_used": account.margin_used,
+            "daily_pnl": total_unrealized,
+            "total_realized_pnl": total_realized,
+            "position_count": len(positions),
+            "positions": positions,
+        }
 
 
 _CONTRACT_NOTES: dict[str, dict[str, Any]] = {
@@ -142,6 +423,208 @@ class FuturesWorkbenchService:
                 "period_low": min(closes),
                 "average_volume": round(sum(volumes) / len(volumes), 4),
             },
+        }
+
+    # ─── FT-08: Trading Calendar and Session Periods ────────────────────────────────
+
+    def trading_calendar(self) -> dict[str, Any]:
+        """Return futures trading calendar with session periods (FT-08).
+
+        Returns trading sessions for each market region including day/night sessions.
+        """
+        return {
+            "source": "simulated_futures_exchange",
+            "as_of": self.clock().isoformat(),
+            "markets": {
+                market_label: {
+                    "label": market_label,
+                    "sessions": sessions,
+                }
+                for market_label, sessions in _TRADING_SESSIONS.items()
+            },
+            "session_definitions": {
+                "day": {"description": "日盘 (Day Session)", "typical_hours": "09:00-15:00 CST"},
+                "night": {"description": "夜盘 (Night Session)", "typical_hours": "21:00-02:00 CST"},
+                "electronic": {"description": "电子盘 (Electronic Session)", "typical_hours": "CME: 17:00-16:00 EST"},
+            },
+            "settlement_windows": [
+                {"market": "中金所", "time": "15:00-15:15 CST", "description": "当日结算"},
+                {"market": "上期所", "time": "15:00-15:30 CST", "description": "当日结算"},
+                {"market": "CME", "time": "16:00 EST", "description": "每日结算"},
+            ],
+        }
+
+    def get_trading_sessions(self, instrument_id: str) -> dict[str, Any]:
+        """Return trading sessions for a specific contract (FT-08)."""
+        instrument = self._instrument(instrument_id)
+        notes = _CONTRACT_NOTES.get(instrument.instrument_id, {})
+        market_label = notes.get("market_label", "其他")
+        sessions = _TRADING_SESSIONS.get(market_label, [])
+        return {
+            "instrument_id": instrument_id,
+            "market_label": market_label,
+            "sessions": sessions,
+            "trading_hours": self._format_trading_hours(sessions),
+        }
+
+    def _format_trading_hours(self, sessions: list[dict[str, str]]) -> str:
+        """Format trading sessions into readable string."""
+        if not sessions:
+            return "24/7"
+        return ", ".join(f"{s['start']}-{s['end']} ({s['label']})" for s in sessions)
+
+    # ─── FT-09: Main Contract and Continuous Contract Mapping ──────────────────────
+
+    def get_main_contract(self, product_code: str) -> dict[str, Any]:
+        """Return the main (front-month) contract for a product (FT-09).
+
+        Args:
+            product_code: Product code like "IF", "AU", "CL"
+        """
+        main_id = _MAIN_CONTRACT_ALIASES.get(product_code.upper())
+        if not main_id:
+            raise KeyError(f"No main contract for product: {product_code}")
+        return self.get_contract(main_id)
+
+    def get_continuous_contract(self, product_code: str) -> dict[str, Any]:
+        """Return continuous contract chain for a product (FT-09).
+
+        Returns the list of all contracts in the chain for rollover analysis.
+        """
+        chain = _CONTINUOUS_CONTRACTS.get(product_code.upper())
+        if not chain:
+            raise KeyError(f"No continuous contract chain for: {product_code}")
+        return {
+            "product_code": product_code.upper(),
+            "main_contract": _MAIN_CONTRACT_ALIASES.get(product_code.upper()),
+            "chain": [
+                {
+                    "instrument_id": contract_id,
+                    "display_name": _CONTRACT_NOTES.get(contract_id, {}).get("name", contract_id),
+                    "expiry": self._instruments[contract_id].expiry_at.isoformat() if contract_id in self._instruments and self._instruments[contract_id].expiry_at else None,
+                }
+                for contract_id in chain
+            ],
+        }
+
+    def get_rollover_recommendation(self, product_code: str) -> dict[str, Any]:
+        """Provide rollover recommendation based on position and expiry (FT-09)."""
+        chain_data = self.get_continuous_contract(product_code)
+        main_contract = chain_data["main_contract"]
+        if main_contract and main_contract in self._instruments:
+            inst = self._instruments[main_contract]
+            days_to_expiry = (inst.expiry_at - self.clock()).days if inst.expiry_at else 999
+            return {
+                "product_code": product_code.upper(),
+                "recommended_action": "roll" if days_to_expiry < 7 else "hold",
+                "days_to_expiry": days_to_expiry,
+                "target_contract": chain_data["chain"][0]["instrument_id"] if chain_data["chain"] else None,
+                "rationale": "Near expiry - consider rolling to next contract" if days_to_expiry < 7 else "Sufficient time remaining",
+            }
+        return {
+            "product_code": product_code.upper(),
+            "recommended_action": "unknown",
+            "days_to_expiry": None,
+            "target_contract": None,
+            "rationale": "Contract data not available",
+        }
+
+    # ─── FT-11: Unified Cross-Market Portfolio View ─────────────────────────────────
+
+    def unified_portfolio_summary(
+        self,
+        stock_positions: list[dict[str, Any]] | None = None,
+        crypto_positions: list[dict[str, Any]] | None = None,
+        futures_positions: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Return unified portfolio view across stocks, crypto, and futures (FT-11).
+
+        Aggregates positions and risk metrics across all asset classes.
+        """
+        stock_positions = stock_positions or []
+        crypto_positions = crypto_positions or []
+        futures_positions = futures_positions or []
+
+        total_equity = 0.0
+        total_exposure = 0.0
+        by_asset_class = {}
+
+        # Aggregate stock positions
+        stock_exposure = sum(p.get("market_value", 0) for p in stock_positions)
+        stock_pnl = sum(p.get("unrealized_pnl", 0) for p in stock_positions)
+        by_asset_class["stocks"] = {
+            "position_count": len(stock_positions),
+            "total_exposure": stock_exposure,
+            "total_pnl": stock_pnl,
+            "positions": stock_positions,
+        }
+        total_exposure += stock_exposure
+
+        # Aggregate crypto positions
+        crypto_exposure = sum(p.get("market_value", 0) for p in crypto_positions)
+        crypto_pnl = sum(p.get("unrealized_pnl", 0) for p in crypto_positions)
+        by_asset_class["crypto"] = {
+            "position_count": len(crypto_positions),
+            "total_exposure": crypto_exposure,
+            "total_pnl": crypto_pnl,
+            "positions": crypto_positions,
+        }
+        total_exposure += crypto_exposure
+
+        # Aggregate futures positions
+        futures_exposure = sum(abs(p.get("notional_value", 0)) for p in futures_positions)
+        futures_pnl = sum(p.get("unrealized_pnl", 0) for p in futures_positions)
+        futures_margin = sum(p.get("margin_used", 0) for p in futures_positions)
+        by_asset_class["futures"] = {
+            "position_count": len(futures_positions),
+            "total_exposure": futures_exposure,
+            "total_pnl": futures_pnl,
+            "margin_used": futures_margin,
+            "positions": futures_positions,
+        }
+        total_exposure += futures_exposure
+
+        return {
+            "source": "unified_portfolio",
+            "as_of": self.clock().isoformat(),
+            "total_exposure": total_exposure,
+            "total_pnl": stock_pnl + crypto_pnl + futures_pnl,
+            "asset_class_breakdown": by_asset_class,
+            "cross_market_risk": {
+                "leverage_ratio": round(futures_margin / max(total_exposure, 1), 4),
+                "concentration_risk": self._calculate_concentration_risk(stock_positions, crypto_positions, futures_positions),
+            },
+        }
+
+    def _calculate_concentration_risk(
+        self,
+        stock_positions: list[dict[str, Any]],
+        crypto_positions: list[dict[str, Any]],
+        futures_positions: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Calculate concentration risk metrics across asset classes (FT-11)."""
+        all_positions = len(stock_positions) + len(crypto_positions) + len(futures_positions)
+        if all_positions == 0:
+            return {"level": "none", "top_holdings": []}
+
+        # Find largest positions by exposure
+        all_vals = []
+        for p in stock_positions:
+            all_vals.append((p.get("instrument_id", ""), abs(p.get("market_value", 0)), "stock"))
+        for p in crypto_positions:
+            all_vals.append((p.get("instrument_id", ""), abs(p.get("market_value", 0)), "crypto"))
+        for p in futures_positions:
+            all_vals.append((p.get("instrument_id", ""), abs(p.get("notional_value", 0)), "futures"))
+
+        all_vals.sort(key=lambda x: x[1], reverse=True)
+        top_5 = all_vals[:5]
+
+        largest_exposure = all_vals[0][1] if all_vals else 0
+        total_exposure = sum(v[1] for v in all_vals)
+
+        return {
+            "level": "high" if (largest_exposure / max(total_exposure, 1)) > 0.3 else "medium" if (largest_exposure / max(total_exposure, 1)) > 0.15 else "low",
+            "top_holdings": [{"instrument_id": v[0], "exposure": v[1], "asset_class": v[2]} for v in top_5],
         }
 
     # --- internal methods ---

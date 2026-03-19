@@ -19,6 +19,7 @@ from quant_exchange.adapters.registry import AdapterRegistry
 from quant_exchange.adapters.simulated import SimulatedFuturesBrokerAdapter
 from quant_exchange.core.models import Kline, MarketType
 from quant_exchange.futures import FuturesWorkbenchService
+from quant_exchange.futures.service import FuturesTradingService
 from quant_exchange.marketdata.service import MarketDataStore
 
 
@@ -291,6 +292,235 @@ class FuturesContractNotesTests(unittest.TestCase):
         required = {"name", "summary", "category", "market_label"}
         for contract_id, notes in _CONTRACT_NOTES.items():
             self.assertTrue(required.issubset(notes.keys()), f"{contract_id} missing fields")
+
+
+class FuturesTradingCalendarTests(unittest.TestCase):
+    """Test FT-08: Trading calendar and session periods."""
+
+    def setUp(self) -> None:
+        self.registry = AdapterRegistry()
+        self.futures_adapter = SimulatedFuturesBrokerAdapter()
+        self.registry.register_market_data("SIM_FUTURES", self.futures_adapter)
+        self.market_data_store = MarketDataStore()
+        self.service = FuturesWorkbenchService(
+            adapter_registry=self.registry,
+            market_data_store=self.market_data_store,
+        )
+
+    def test_ft_08_trading_calendar_returns_structure(self) -> None:
+        """Verify trading_calendar returns correct structure."""
+        calendar = self.service.trading_calendar()
+        self.assertIn("source", calendar)
+        self.assertIn("markets", calendar)
+        self.assertIn("session_definitions", calendar)
+        self.assertIn("settlement_windows", calendar)
+
+    def test_ft_08_markets_have_sessions(self) -> None:
+        """Verify each market has trading sessions."""
+        calendar = self.service.trading_calendar()
+        markets = calendar["markets"]
+        self.assertIn("中金所", markets)
+        self.assertIn("上期所", markets)
+        self.assertIn("CME", markets)
+
+    def test_ft_08_session_definitions_exist(self) -> None:
+        """Verify session types are defined."""
+        calendar = self.service.trading_calendar()
+        sessions = calendar["session_definitions"]
+        self.assertIn("day", sessions)
+        self.assertIn("night", sessions)
+        self.assertIn("electronic", sessions)
+
+    def test_ft_08_get_trading_sessions_for_contract(self) -> None:
+        """Verify get_trading_sessions returns sessions for a contract."""
+        sessions = self.service.get_trading_sessions("IF2503")
+        self.assertIn("instrument_id", sessions)
+        self.assertIn("market_label", sessions)
+        self.assertIn("sessions", sessions)
+        self.assertEqual(sessions["market_label"], "中金所")
+
+
+class FuturesContinuousContractTests(unittest.TestCase):
+    """Test FT-09: Main contract and continuous contract mapping."""
+
+    def setUp(self) -> None:
+        self.registry = AdapterRegistry()
+        self.futures_adapter = SimulatedFuturesBrokerAdapter()
+        self.registry.register_market_data("SIM_FUTURES", self.futures_adapter)
+        self.market_data_store = MarketDataStore()
+        self.service = FuturesWorkbenchService(
+            adapter_registry=self.registry,
+            market_data_store=self.market_data_store,
+        )
+
+    def test_ft_09_get_main_contract(self) -> None:
+        """Verify get_main_contract returns main contract for a product."""
+        main = self.service.get_main_contract("IF")
+        self.assertEqual(main["instrument_id"], "IF2506")
+
+    def test_ft_09_get_main_contract_unknown_raises(self) -> None:
+        """Verify unknown product code raises KeyError."""
+        with self.assertRaises(KeyError):
+            self.service.get_main_contract("UNKNOWN")
+
+    def test_ft_09_get_continuous_contract(self) -> None:
+        """Verify get_continuous_contract returns contract chain."""
+        chain = self.service.get_continuous_contract("AU")
+        self.assertEqual(chain["product_code"], "AU")
+        self.assertIn("main_contract", chain)
+        self.assertIn("chain", chain)
+        self.assertGreater(len(chain["chain"]), 0)
+
+    def test_ft_09_get_continuous_contract_unknown_raises(self) -> None:
+        """Verify unknown product raises KeyError."""
+        with self.assertRaises(KeyError):
+            self.service.get_continuous_contract("UNKNOWN")
+
+    def test_ft_09_rollover_recommendation(self) -> None:
+        """Verify rollover recommendation is returned."""
+        rec = self.service.get_rollover_recommendation("IF")
+        self.assertIn("product_code", rec)
+        self.assertIn("recommended_action", rec)
+        self.assertIn("days_to_expiry", rec)
+
+
+class FuturesSimulatedTradingTests(unittest.TestCase):
+    """Test FT-10: Futures simulated trading."""
+
+    def setUp(self) -> None:
+        self.trading = FuturesTradingService()
+
+    def test_ft_10_account_creation(self) -> None:
+        """Verify futures trading account can be created."""
+        account = self.trading.get_or_create_account("test_account", initial_equity=500000.0)
+        self.assertEqual(account.account_code, "test_account")
+        self.assertEqual(account.initial_equity, 500000.0)
+        self.assertEqual(account.current_equity, 500000.0)
+
+    def test_ft_10_submit_market_order(self) -> None:
+        """Verify market order can be submitted and filled."""
+        order = self.trading.submit_order(
+            account_code="test_account",
+            instrument_id="IF2506",
+            direction="long",
+            quantity=1,
+            order_type="market",
+            contract_multiplier=300.0,
+        )
+        self.assertEqual(order.status, "filled")
+        self.assertEqual(order.filled_quantity, 1)
+
+    def test_ft_10_submit_limit_order(self) -> None:
+        """Verify limit order can be submitted."""
+        order = self.trading.submit_order(
+            account_code="test_account",
+            instrument_id="IF2506",
+            direction="long",
+            quantity=1,
+            order_type="limit",
+            limit_price=4000.0,
+            contract_multiplier=300.0,
+        )
+        self.assertEqual(order.status, "filled")
+        self.assertEqual(order.avg_fill_price, 4000.0)
+
+    def test_ft_10_get_positions(self) -> None:
+        """Verify positions can be retrieved."""
+        self.trading.submit_order(
+            account_code="test_account",
+            instrument_id="IF2506",
+            direction="long",
+            quantity=1,
+            order_type="market",
+            contract_multiplier=300.0,
+        )
+        positions = self.trading.get_positions("test_account")
+        self.assertGreaterEqual(len(positions), 1)
+
+    def test_ft_10_get_dashboard(self) -> None:
+        """Verify dashboard returns account summary."""
+        self.trading.submit_order(
+            account_code="test_account",
+            instrument_id="IF2506",
+            direction="long",
+            quantity=1,
+            order_type="market",
+            contract_multiplier=300.0,
+        )
+        dashboard = self.trading.get_dashboard("test_account")
+        self.assertIn("account_code", dashboard)
+        self.assertIn("current_equity", dashboard)
+        self.assertIn("positions", dashboard)
+
+    def test_ft_10_mark_to_market(self) -> None:
+        """Verify mark to market updates positions."""
+        self.trading.submit_order(
+            account_code="test_account",
+            instrument_id="IF2506",
+            direction="long",
+            quantity=1,
+            order_type="market",
+            contract_multiplier=300.0,
+        )
+        result = self.trading.mark_to_market("test_account", "IF2506", 4100.0)
+        self.assertIn("daily_pnl", result)
+        self.assertIn("current_equity", result)
+
+
+class UnifiedPortfolioViewTests(unittest.TestCase):
+    """Test FT-11: Unified cross-market portfolio view."""
+
+    def setUp(self) -> None:
+        self.registry = AdapterRegistry()
+        self.futures_adapter = SimulatedFuturesBrokerAdapter()
+        self.registry.register_market_data("SIM_FUTURES", self.futures_adapter)
+        self.market_data_store = MarketDataStore()
+        self.service = FuturesWorkbenchService(
+            adapter_registry=self.registry,
+            market_data_store=self.market_data_store,
+        )
+
+    def test_ft_11_unified_portfolio_empty(self) -> None:
+        """Verify unified portfolio with no positions."""
+        summary = self.service.unified_portfolio_summary()
+        self.assertIn("source", summary)
+        self.assertEqual(summary["source"], "unified_portfolio")
+        self.assertIn("asset_class_breakdown", summary)
+
+    def test_ft_11_unified_portfolio_with_positions(self) -> None:
+        """Verify unified portfolio with positions across asset classes."""
+        stock_positions = [
+            {"instrument_id": "AAPL.US", "market_value": 100000, "unrealized_pnl": 5000},
+        ]
+        crypto_positions = [
+            {"instrument_id": "BTCUSDT", "market_value": 50000, "unrealized_pnl": 2000},
+        ]
+        futures_positions = [
+            {"instrument_id": "IF2506", "notional_value": 300000, "unrealized_pnl": -1000, "margin_used": 36000},
+        ]
+        summary = self.service.unified_portfolio_summary(
+            stock_positions=stock_positions,
+            crypto_positions=crypto_positions,
+            futures_positions=futures_positions,
+        )
+        self.assertIn("total_exposure", summary)
+        self.assertIn("total_pnl", summary)
+        self.assertIn("cross_market_risk", summary)
+        breakdown = summary["asset_class_breakdown"]
+        self.assertIn("stocks", breakdown)
+        self.assertIn("crypto", breakdown)
+        self.assertIn("futures", breakdown)
+
+    def test_ft_11_concentration_risk_calculation(self) -> None:
+        """Verify concentration risk is calculated."""
+        stock_positions = [
+            {"instrument_id": "AAPL.US", "market_value": 80000, "unrealized_pnl": 5000},
+            {"instrument_id": "MSFT.US", "market_value": 20000, "unrealized_pnl": 1000},
+        ]
+        summary = self.service.unified_portfolio_summary(stock_positions=stock_positions)
+        risk = summary["cross_market_risk"]["concentration_risk"]
+        self.assertIn("level", risk)
+        self.assertIn("top_holdings", risk)
 
 
 if __name__ == "__main__":

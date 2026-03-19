@@ -501,6 +501,73 @@ class StockScreenerWebApp:
             interval = query.get("interval", ["1d"])[0]
             limit = int(query.get("limit", ["120"])[0])
             return self._json(start_response, self.platform.api.get_futures_klines(instrument_id, interval=interval, limit=limit))
+        # FT-08: Trading Calendar
+        if path == "/api/futures/calendar" and method == "GET":
+            return self._json(start_response, self.platform.api.get_futures_trading_calendar())
+        if path == "/api/futures/sessions" and method == "GET":
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            instrument_id = query.get("instrument_id", [""])[0]
+            return self._json(start_response, self.platform.api.get_futures_trading_sessions(instrument_id))
+        # FT-09: Main Contract and Continuous Contract Mapping
+        if path == "/api/futures/main-contract" and method == "GET":
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            product_code = query.get("product_code", [""])[0]
+            return self._json(start_response, self.platform.api.get_main_contract(product_code))
+        if path == "/api/futures/continuous-contract" and method == "GET":
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            product_code = query.get("product_code", [""])[0]
+            return self._json(start_response, self.platform.api.get_continuous_contract(product_code))
+        if path == "/api/futures/rollover" and method == "GET":
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            product_code = query.get("product_code", [""])[0]
+            return self._json(start_response, self.platform.api.get_rollover_recommendation(product_code))
+        # FT-10: Futures Simulated Trading
+        if path == "/api/futures/dashboard" and method == "GET":
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            account_code = query.get("account_code", ["futures_main"])[0]
+            return self._json(start_response, self.platform.api.get_futures_dashboard(account_code))
+        if path == "/api/futures/positions" and method == "GET":
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            account_code = query.get("account_code", ["futures_main"])[0]
+            return self._json(start_response, self.platform.api.get_futures_positions(account_code))
+        if path == "/api/futures/orders" and method == "POST":
+            payload = self._read_json(environ)
+            return self._json(
+                start_response,
+                self.platform.api.submit_futures_order(
+                    account_code=payload.get("account_code", "futures_main"),
+                    instrument_id=payload.get("instrument_id", ""),
+                    direction=payload.get("direction", "long"),
+                    quantity=int(payload.get("quantity", 0)),
+                    order_type=payload.get("order_type", "market"),
+                    limit_price=payload.get("limit_price"),
+                    contract_multiplier=float(payload.get("contract_multiplier", 1.0)),
+                ),
+            )
+        if path == "/api/futures/mark-to-market" and method == "POST":
+            payload = self._read_json(environ)
+            return self._json(
+                start_response,
+                self.platform.api.mark_futures_to_market(
+                    account_code=payload.get("account_code", "futures_main"),
+                    instrument_id=payload.get("instrument_id", ""),
+                    current_price=float(payload.get("current_price", 0)),
+                ),
+            )
+        # FT-11: Unified Portfolio View
+        if path == "/api/unified-portfolio" and method == "GET":
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            stock_positions = None
+            crypto_positions = None
+            futures_positions = None
+            return self._json(
+                start_response,
+                self.platform.api.get_unified_portfolio_summary(
+                    stock_positions=stock_positions,
+                    crypto_positions=crypto_positions,
+                    futures_positions=futures_positions,
+                ),
+            )
         if method not in {"GET", "POST"}:
             return self._json(start_response, {"code": "METHOD_NOT_ALLOWED"}, status="405 Method Not Allowed")
         return self._json(start_response, {"code": "NOT_FOUND"}, status="404 Not Found")

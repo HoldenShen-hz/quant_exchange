@@ -16,6 +16,7 @@ from quant_exchange.bots import StrategyBotService
 from quant_exchange.config.settings import AppSettings
 from quant_exchange.crypto import CryptoWorkbenchService
 from quant_exchange.futures import FuturesWorkbenchService
+from quant_exchange.futures.service import FuturesTradingService
 from quant_exchange.enhanced import (
     AdvancedExecutionService,
     AlternativeDataService,
@@ -94,6 +95,7 @@ class QuantTradingPlatform:
         self._register_default_adapters()
         self.crypto = CryptoWorkbenchService(self.adapters, self.market_data)
         self.futures = FuturesWorkbenchService(self.adapters, self.market_data)
+        self.futures_trading = FuturesTradingService()
         self.stocks.bootstrap_persisted_or_demo_directory()
         self.realtime_market = RealtimeMarketService(self.stocks, persist_minute_bars=False)
         self.paper_trading.realtime_market = self.realtime_market

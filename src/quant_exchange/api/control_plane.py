@@ -268,6 +268,125 @@ class ControlPlaneAPI:
         except Exception as exc:
             return self._error("TEMPORARILY_UNAVAILABLE", f"Futures service unavailable: {exc}")
 
+    # ─── FT-08: Trading Calendar and Session Periods ────────────────────────────────
+
+    def get_futures_trading_calendar(self) -> dict:
+        """Return futures trading calendar with session periods (FT-08)."""
+        try:
+            return self._ok(self.platform.futures.trading_calendar())
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Futures service unavailable: {exc}")
+
+    def get_futures_trading_sessions(self, instrument_id: str) -> dict:
+        """Return trading sessions for a specific contract (FT-08)."""
+        try:
+            return self._ok(self.platform.futures.get_trading_sessions(instrument_id))
+        except KeyError:
+            return self._error("NOT_FOUND", f"Futures contract {instrument_id} not found.")
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Futures service unavailable: {exc}")
+
+    # ─── FT-09: Main Contract and Continuous Contract Mapping ────────────────────────
+
+    def get_main_contract(self, product_code: str) -> dict:
+        """Return the main (front-month) contract for a product (FT-09)."""
+        try:
+            return self._ok(self.platform.futures.get_main_contract(product_code))
+        except KeyError:
+            return self._error("NOT_FOUND", f"No main contract for product: {product_code}")
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Futures service unavailable: {exc}")
+
+    def get_continuous_contract(self, product_code: str) -> dict:
+        """Return continuous contract chain for a product (FT-09)."""
+        try:
+            return self._ok(self.platform.futures.get_continuous_contract(product_code))
+        except KeyError:
+            return self._error("NOT_FOUND", f"No continuous contract chain for: {product_code}")
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Futures service unavailable: {exc}")
+
+    def get_rollover_recommendation(self, product_code: str) -> dict:
+        """Provide rollover recommendation based on position and expiry (FT-09)."""
+        try:
+            return self._ok(self.platform.futures.get_rollover_recommendation(product_code))
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Futures service unavailable: {exc}")
+
+    # ─── FT-10: Futures Simulated Trading ─────────────────────────────────────────
+
+    def get_futures_dashboard(self, account_code: str = "futures_main") -> dict:
+        """Return futures trading dashboard (FT-10)."""
+        try:
+            return self._ok(self.platform.futures_trading.get_dashboard(account_code))
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Futures trading unavailable: {exc}")
+
+    def submit_futures_order(
+        self,
+        account_code: str,
+        instrument_id: str,
+        direction: str,
+        quantity: int,
+        order_type: str = "market",
+        limit_price: float | None = None,
+        contract_multiplier: float = 1.0,
+    ) -> dict:
+        """Submit a futures order (FT-10)."""
+        try:
+            order = self.platform.futures_trading.submit_order(
+                account_code=account_code,
+                instrument_id=instrument_id,
+                direction=direction,
+                quantity=quantity,
+                order_type=order_type,
+                limit_price=limit_price,
+                contract_multiplier=contract_multiplier,
+            )
+            return self._ok({"order": {
+                "order_id": order.order_id,
+                "instrument_id": order.instrument_id,
+                "direction": order.direction,
+                "quantity": order.quantity,
+                "filled_quantity": order.filled_quantity,
+                "avg_fill_price": order.avg_fill_price,
+                "status": order.status,
+            }})
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Futures order failed: {exc}")
+
+    def get_futures_positions(self, account_code: str = "futures_main") -> dict:
+        """Get all positions for a futures account (FT-10)."""
+        try:
+            return self._ok({"positions": self.platform.futures_trading.get_positions(account_code)})
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Futures positions unavailable: {exc}")
+
+    def mark_futures_to_market(self, account_code: str, instrument_id: str, current_price: float) -> dict:
+        """Mark positions to market price (FT-10)."""
+        try:
+            return self._ok(self.platform.futures_trading.mark_to_market(account_code, instrument_id, current_price))
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Mark to market failed: {exc}")
+
+    # ─── FT-11: Unified Cross-Market Portfolio View ─────────────────────────────────
+
+    def get_unified_portfolio_summary(
+        self,
+        stock_positions: list[dict[str, Any]] | None = None,
+        crypto_positions: list[dict[str, Any]] | None = None,
+        futures_positions: list[dict[str, Any]] | None = None,
+    ) -> dict:
+        """Return unified portfolio view across stocks, crypto, and futures (FT-11)."""
+        try:
+            return self._ok(self.platform.futures.unified_portfolio_summary(
+                stock_positions=stock_positions,
+                crypto_positions=crypto_positions,
+                futures_positions=futures_positions,
+            ))
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Unified portfolio unavailable: {exc}")
+
     def get_stock_detail(self, instrument_id: str) -> dict:
         """Return one stock detail record including F10-style fields."""
 
