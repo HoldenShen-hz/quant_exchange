@@ -48,13 +48,43 @@ class MonitoringService:
         self.escalation_threshold = escalation_threshold
         # Track recent alerts by code for dedup and escalation
         self._recent_alerts: dict[str, list[datetime]] = defaultdict(list)
+        # Alert suppression windows (code -> suppression_end_time)
+        self._suppression: dict[str, datetime] = {}
         # Metrics counters
         self._metrics: dict[str, float] = defaultdict(float)
 
-    def add_alert(self, code: str, severity: AlertSeverity, message: str, *, context: dict | None = None) -> Alert:
-        """Append a structured alert with deduplication and optional escalation."""
+    def suppress_alerts(self, code: str, until: datetime) -> None:
+        """Suppress alerts with the given code until the specified time (maintenance window)."""
+        self._suppression[code] = until
+
+    def unsuppress_alerts(self, code: str) -> None:
+        """Remove suppression for the given alert code."""
+        self._suppression.pop(code, None)
+
+    def get_suppression(self, code: str) -> datetime | None:
+        """Return the suppression end time for a code, or None if not suppressed."""
+        return self._suppression.get(code)
+
+    def is_suppressed(self, code: str) -> bool:
+        """Return True if the alert code is currently suppressed."""
+        end = self._suppression.get(code)
+        if end is None:
+            return False
+        if utc_now() >= end:
+            del self._suppression[code]
+            return False
+        return True
+
+    def add_alert(self, code: str, severity: AlertSeverity, message: str, *, context: dict | None = None) -> Alert | None:
+        """Append a structured alert with deduplication and optional escalation.
+
+        Returns None if the alert is currently suppressed.
+        """
 
         now = utc_now()
+        # Check suppression window
+        if self.is_suppressed(code):
+            return None
         # Deduplication: suppress identical alerts within window
         cutoff = now - self.dedup_window
         recent = [t for t in self._recent_alerts[code] if t > cutoff]

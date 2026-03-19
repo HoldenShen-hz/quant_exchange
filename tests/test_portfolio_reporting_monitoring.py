@@ -57,6 +57,36 @@ class PortfolioReportingMonitoringTests(unittest.TestCase):
         self.assertIn("equity", summary)
         self.assertIn("drawdown", summary)
 
+    def test_mo_suppress_and_unsuppress_alerts(self) -> None:
+        monitoring = MonitoringService()
+        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        # Suppress drawdown_threshold alerts
+        monitoring.suppress_alerts("drawdown_threshold", future)
+        self.assertTrue(monitoring.is_suppressed("drawdown_threshold"))
+        # add_alert should return None when suppressed
+        alert = monitoring.add_alert(
+            "drawdown_threshold",
+            AlertSeverity.CRITICAL,
+            "Should be suppressed",
+        )
+        self.assertIsNone(alert)
+        # Unsuppress
+        monitoring.unsuppress_alerts("drawdown_threshold")
+        self.assertFalse(monitoring.is_suppressed("drawdown_threshold"))
+        alert = monitoring.add_alert(
+            "drawdown_threshold",
+            AlertSeverity.CRITICAL,
+            "Should not be suppressed",
+        )
+        self.assertIsNotNone(alert)
+
+    def test_mo_prometheus_metrics_output(self) -> None:
+        monitoring = MonitoringService()
+        metrics = monitoring.prometheus_metrics()
+        self.assertIsInstance(metrics, str)
+        # Should contain HELP and TYPE lines
+        self.assertIn("alerts_total", metrics)
+
 
 if __name__ == "__main__":
     unittest.main()

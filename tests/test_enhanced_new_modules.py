@@ -83,6 +83,16 @@ from quant_exchange.enhanced import (
 
 # Import EconomicEvent from information_sources (name conflicts with fx.EconomicEvent)
 from quant_exchange.enhanced.information_sources import EconomicEvent as InfoEconomicEvent
+from quant_exchange.enhanced.portfolio_allocators import (
+    PortfolioAllocatorService,
+    AllocatorConfig,
+    AllocatorType,
+    AllocationResult,
+    PortfolioAllocation,
+    RebalanceTrigger,
+    RebalancePlan,
+    RiskBudget,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -590,6 +600,143 @@ class TestInformationService(unittest.TestCase):
         self.assertFalse(source.is_enabled)
         source = self.info.enable_source("reuters")
         self.assertTrue(source.is_enabled)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Portfolio Allocator Tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestPortfolioAllocatorService(unittest.TestCase):
+    def setUp(self):
+        self.allocator = PortfolioAllocatorService()
+
+    def test_calculate_allocation_equal_weight(self):
+        config = AllocatorConfig(
+            config_id="alloc-1",
+            name="Equal Weight Allocator",
+            allocator_type=AllocatorType.EQUAL_WEIGHT,
+        )
+        expected_returns = {"AAPL": 0.12, "MSFT": 0.10, "GOOGL": 0.08}
+        volatilities = {"AAPL": 0.20, "MSFT": 0.15, "GOOGL": 0.18}
+        result = self.allocator.calculate_allocation(config, expected_returns, volatilities)
+        self.assertIsInstance(result, AllocationResult)
+        self.assertEqual(len(result.weights), 3)
+
+    def test_calculate_allocation_risk_parity(self):
+        config = AllocatorConfig(
+            config_id="alloc-2",
+            name="Risk Parity Allocator",
+            allocator_type=AllocatorType.RISK_PARITY,
+        )
+        expected_returns = {"AAPL": 0.12, "TLT": 0.04, "GLD": 0.06}
+        volatilities = {"AAPL": 0.25, "TLT": 0.08, "GLD": 0.12}
+        result = self.allocator.calculate_allocation(config, expected_returns, volatilities)
+        self.assertIsInstance(result, AllocationResult)
+        self.assertTrue(len(result.weights) == 3)
+
+    def test_calculate_allocation_black_litterman(self):
+        config = AllocatorConfig(
+            config_id="alloc-3",
+            name="Black-Litterman Allocator",
+            allocator_type=AllocatorType.BLACK_LITTERMAN,
+            equilibrium_returns={"AAPL": 0.10, "MSFT": 0.08},
+            views={"AAPL": 0.15, "MSFT": 0.06},
+            view_confidence=0.6,
+        )
+        expected_returns = {"AAPL": 0.10, "MSFT": 0.08}
+        volatilities = {"AAPL": 0.20, "MSFT": 0.18}
+        result = self.allocator.calculate_allocation(config, expected_returns, volatilities)
+        self.assertIsInstance(result, AllocationResult)
+
+    def test_calculate_allocation_equal_risk(self):
+        config = AllocatorConfig(
+            config_id="alloc-4",
+            name="Equal Risk Allocator",
+            allocator_type=AllocatorType.EQUAL_RISK,
+        )
+        expected_returns = {"AAPL": 0.12, "MSFT": 0.10, "GOOGL": 0.08}
+        volatilities = {"AAPL": 0.20, "MSFT": 0.15, "GOOGL": 0.18}
+        result = self.allocator.calculate_allocation(config, expected_returns, volatilities)
+        self.assertIsInstance(result, AllocationResult)
+        self.assertTrue(len(result.weights) == 3)
+
+    def test_calculate_allocation_min_variance(self):
+        config = AllocatorConfig(
+            config_id="alloc-5",
+            name="Min Variance Allocator",
+            allocator_type=AllocatorType.MIN_VARIANCE,
+        )
+        expected_returns = {"AAPL": 0.12, "MSFT": 0.10}
+        volatilities = {"AAPL": 0.25, "MSFT": 0.15}
+        correlations = {("AAPL", "MSFT"): 0.3, ("MSFT", "AAPL"): 0.3}
+        result = self.allocator.calculate_allocation(
+            config, expected_returns, volatilities, correlations
+        )
+        self.assertIsInstance(result, AllocationResult)
+
+    def test_calculate_allocation_with_constraints(self):
+        config = AllocatorConfig(
+            config_id="alloc-6",
+            name="Constrained Allocator",
+            allocator_type=AllocatorType.EQUAL_WEIGHT,
+            max_weight=0.5,
+            min_weight=0.1,
+        )
+        expected_returns = {"AAPL": 0.12, "MSFT": 0.10, "GOOGL": 0.08}
+        volatilities = {"AAPL": 0.20, "MSFT": 0.15, "GOOGL": 0.18}
+        result = self.allocator.calculate_allocation(config, expected_returns, volatilities)
+        self.assertIsInstance(result, AllocationResult)
+
+    def test_check_rebalance_needed(self):
+        config = self.allocator.create_allocator(
+            user_id="user1",
+            allocator_type=AllocatorType.EQUAL_WEIGHT,
+            name="Rebalance Test Allocator",
+            drift_threshold=0.05,
+        )
+        allocation = PortfolioAllocation(
+            allocation_id="pa-rebal-1",
+            user_id="user1",
+            portfolio_id="pf-1",
+            allocator_config=config,
+            target_weights={"AAPL": 0.3, "MSFT": 0.4},
+            current_weights={"AAPL": 0.5, "MSFT": 0.2},
+            drift={"AAPL": 0.2, "MSFT": 0.2},
+            needs_rebalance=True,
+        )
+        needed = self.allocator.check_rebalance_needed(
+            allocation, current_weights={"AAPL": 0.5, "MSFT": 0.2}
+        )
+        self.assertIsInstance(needed, bool)
+
+    def test_calculate_rebalance_plan(self):
+        plan = self.allocator.calculate_rebalance_plan(
+            portfolio_id="pf-1",
+            target_weights={"AAPL": 0.3, "MSFT": 0.4, "GOOGL": 0.3},
+            current_weights={"AAPL": 0.5, "MSFT": 0.2, "GOOGL": 0.3},
+            current_prices={"AAPL": 150.0, "MSFT": 300.0, "GOOGL": 140.0},
+            notional=100000.0,
+        )
+        self.assertIsInstance(plan, RebalancePlan)
+
+    def test_create_allocator(self):
+        created = self.allocator.create_allocator(
+            user_id="user1",
+            allocator_type=AllocatorType.EQUAL_WEIGHT,
+            name="Test Allocator",
+        )
+        self.assertTrue(created.config_id.startswith("alloc:"))
+        self.assertEqual(created.name, "Test Allocator")
+
+    def test_get_allocator(self):
+        created = self.allocator.create_allocator(
+            user_id="user1",
+            allocator_type=AllocatorType.RISK_PARITY,
+            name="Get Test Allocator",
+        )
+        retrieved = self.allocator.get_allocator(created.config_id)
+        self.assertIsNotNone(retrieved)
+        self.assertEqual(retrieved.config_id, created.config_id)
 
 
 if __name__ == "__main__":

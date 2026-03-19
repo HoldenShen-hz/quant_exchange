@@ -344,6 +344,37 @@ class ReportingService:
             "risk_alerts": self.risk_summary(alerts=alerts),
         }
 
+    # ── Export Methods ─────────────────────────────────────────────────────────
+
+    def export_trades_to_csv(self, fills: list[Fill]) -> str:
+        """Export trade details to CSV format."""
+        lines = ["fill_id,order_id,instrument_id,side,quantity,price,fee,pnl,slippage_bps,timestamp"]
+        for f in fills:
+            lines.append(
+                f"{f.fill_id},{f.order_id},{f.instrument_id},{f.side.value},"
+                f"{f.quantity},{f.price},{f.fee},{getattr(f, 'pnl', 0.0)},"
+                f"{getattr(f, 'slippage_bps', 0.0)},{f.timestamp.isoformat()}"
+            )
+        return "\n".join(lines)
+
+    def export_positions_to_csv(self, positions: dict[str, Position]) -> str:
+        """Export position summary to CSV format."""
+        lines = ["instrument_id,quantity,last_price,realized_pnl,unrealized_pnl,entry_price,sector"]
+        for p in positions.values():
+            lines.append(
+                f"{p.instrument_id},{p.quantity},{p.last_price},"
+                f"{getattr(p, 'realized_pnl', 0.0)},"
+                f"{getattr(p, 'unrealized_pnl', 0.0)},"
+                f"{getattr(p, 'entry_price', 0.0)},"
+                f"{getattr(p, 'sector', '')}"
+            )
+        return "\n".join(lines)
+
+    def export_report_to_json(self, report: dict) -> str:
+        """Export a complete report dictionary to formatted JSON string."""
+        import json
+        return json.dumps(report, indent=2, default=str)
+
 
 class ReportScheduler:
     """Schedule and manage daily report generation tasks."""
@@ -351,12 +382,13 @@ class ReportScheduler:
     def __init__(self) -> None:
         self._tasks: dict[str, DailyReportTask] = {}
 
-    def schedule_daily_report(
+    def schedule_report(
         self,
         account_id: str,
+        period: str = "daily",
         report_date: datetime | None = None,
     ) -> DailyReportTask:
-        """Schedule a daily report generation task."""
+        """Schedule a report generation task for daily, weekly, or monthly period (RP-05)."""
         report_date = report_date or utc_now()
         task = DailyReportTask(
             task_id=str(uuid.uuid4()),
@@ -365,6 +397,30 @@ class ReportScheduler:
         )
         self._tasks[task.task_id] = task
         return task
+
+    def schedule_daily_report(
+        self,
+        account_id: str,
+        report_date: datetime | None = None,
+    ) -> DailyReportTask:
+        """Schedule a daily report generation task."""
+        return self.schedule_report(account_id, "daily", report_date)
+
+    def schedule_weekly_report(
+        self,
+        account_id: str,
+        report_date: datetime | None = None,
+    ) -> DailyReportTask:
+        """Schedule a weekly report generation task (RP-05)."""
+        return self.schedule_report(account_id, "weekly", report_date)
+
+    def schedule_monthly_report(
+        self,
+        account_id: str,
+        report_date: datetime | None = None,
+    ) -> DailyReportTask:
+        """Schedule a monthly report generation task (RP-05)."""
+        return self.schedule_report(account_id, "monthly", report_date)
 
     def get_task(self, task_id: str) -> DailyReportTask | None:
         """Get a report task by ID."""
