@@ -1,7 +1,7 @@
 # TODO: 未完成功能清单
 
 > 基于 doc/ 全部需求文档与代码库的逐项审计，截至 2026-03-20
-> 整体完成度约 97%（本次更新：AI-01~AI-07 LLM助手完成）
+> 整体完成度约 98%（本次更新：HOOK-01~HOOK-05 Webhook自动化完成）
 
 ---
 
@@ -103,7 +103,7 @@
 | MKT-01~MKT-06 | 策略市场(上架/评价/交易) | NO |
 | DSL-01~DSL-05 | 量化脚本语言(QuantScript) | NO |
 | VIS-01~VIS-05 | 可视化策略编辑器(拖拽/流程图) | NO |
-| HOOK-01~HOOK-05 | Webhook与工作流编排 | NO |
+| HOOK-01~HOOK-05 | Webhook与工作流编排 | YES | WebhookService实现入站webhook接收+HMAC验证(verify_signature)，OutboundWebhookService实现出站推送+重试+签名，WebhookWorkflow支持触发器/条件/动作链，ControlPlaneAPI完整端点，17个单元/集成测试全通过 |
 | COMP-01~COMP-04 | 量化竞赛平台 | NO |
 
 ---

@@ -17,6 +17,7 @@ from quant_exchange.config.settings import AppSettings
 from quant_exchange.crypto import CryptoWorkbenchService
 from quant_exchange.futures import FuturesWorkbenchService
 from quant_exchange.infrastructure.cache import CacheService, RedisCacheService, InMemoryCacheService
+from quant_exchange.webhooks import OutboundWebhookService, WebhookService
 from quant_exchange.futures.service import FuturesTradingService
 from quant_exchange.enhanced import (
     AIAssistantService,
@@ -107,6 +108,8 @@ class QuantTradingPlatform:
         self.advanced_execution = AdvancedExecutionService(self.persistence)
         self.derivatives_dex = DerivativesDexService(self.persistence)
         self.dsl = DSLService(self.persistence)  # ST-08 / DSL-01~DSL-05: QuantScript DSL
+        self.webhooks = WebhookService(persistence=self.persistence)  # HOOK-01~HOOK-05: Webhook automation
+        self.outbound_webhooks = OutboundWebhookService(persistence=self.persistence)
         self.history_downloads = HistoryDownloadSupervisor(self._runtime_dir() / "history_downloads")
         self.stocks = StockDirectoryService(self.persistence, registrar=self.register_instrument)
         self.paper_trading = SimulatedTradingService(

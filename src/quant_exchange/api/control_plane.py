@@ -1955,6 +1955,197 @@ class ControlPlaneAPI:
         except Exception as exc:
             return self._error("TEMPORARILY_UNAVAILABLE", f"Explanation generation unavailable: {exc}")
 
+    # ── HOOK-01~HOOK-05: Webhook Automation ─────────────────────────────────
+
+    def webhook_receive(
+        self,
+        trigger_type: str,
+        payload: dict,
+        headers: dict | None = None,
+        secret: str = "",
+    ) -> dict:
+        """Receive an inbound webhook and trigger matching workflows (HOOK-01).
+
+        The payload is verified using HMAC-SHA256 if a secret is provided.
+        Matching workflows are executed based on trigger type and conditions.
+        """
+        try:
+            from quant_exchange.webhooks import WebhookTriggerType
+
+            event = self.platform.webhooks.receive_webhook(
+                trigger_type=trigger_type,
+                payload=payload,
+                headers=headers or {},
+                secret=secret,
+            )
+            return self._ok({
+                "event_id": event.event_id,
+                "trigger_type": event.trigger_type.value,
+                "verified": event.verified,
+                "processed": event.processed,
+                "received_at": event.received_at.isoformat(),
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Webhook reception failed: {exc}")
+
+    def webhook_create_workflow(
+        self,
+        name: str,
+        description: str = "",
+        triggers: list[dict] | None = None,
+        actions: list[dict] | None = None,
+    ) -> dict:
+        """Create a webhook workflow (HOOK-04)."""
+        try:
+            workflow = self.platform.webhooks.create_workflow(
+                name=name,
+                description=description,
+                triggers=triggers,
+                actions=actions,
+            )
+            return self._ok({
+                "workflow_id": workflow.workflow_id,
+                "name": workflow.name,
+                "enabled": workflow.enabled,
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Workflow creation failed: {exc}")
+
+    def webhook_list_workflows(self, enabled: bool | None = None) -> dict:
+        """List webhook workflows."""
+        try:
+            workflows = self.platform.webhooks.list_workflows(enabled=enabled)
+            return self._ok({
+                "workflows": [
+                    {
+                        "workflow_id": w.workflow_id,
+                        "name": w.name,
+                        "description": w.description,
+                        "enabled": w.enabled,
+                        "trigger_count": len(w.triggers),
+                        "action_count": len(w.actions),
+                        "execution_count": w.execution_count,
+                        "success_count": w.success_count,
+                        "failure_count": w.failure_count,
+                        "created_at": w.created_at.isoformat(),
+                    }
+                    for w in workflows
+                ]
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Failed to list workflows: {exc}")
+
+    def webhook_get_workflow(self, workflow_id: str) -> dict:
+        """Get a webhook workflow by ID."""
+        try:
+            workflow = self.platform.webhooks.get_workflow(workflow_id)
+            if not workflow:
+                return self._error("NOT_FOUND", f"Workflow {workflow_id} not found")
+            return self._ok({
+                "workflow_id": workflow.workflow_id,
+                "name": workflow.name,
+                "description": workflow.description,
+                "enabled": workflow.enabled,
+                "triggers": [
+                    {
+                        "trigger_id": t.trigger_id,
+                        "name": t.name,
+                        "trigger_type": t.trigger_type.value,
+                        "conditions": t.conditions,
+                        "enabled": t.enabled,
+                    }
+                    for t in workflow.triggers
+                ],
+                "actions": [
+                    {
+                        "action_id": a.action_id,
+                        "name": a.name,
+                        "action_type": a.action_type.value,
+                        "config": a.config,
+                        "enabled": a.enabled,
+                        "order": a.order,
+                    }
+                    for a in workflow.actions
+                ],
+                "execution_count": workflow.execution_count,
+                "success_count": workflow.success_count,
+                "failure_count": workflow.failure_count,
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Failed to get workflow: {exc}")
+
+    def webhook_delete_workflow(self, workflow_id: str) -> dict:
+        """Delete a webhook workflow."""
+        try:
+            deleted = self.platform.webhooks.delete_workflow(workflow_id)
+            if not deleted:
+                return self._error("NOT_FOUND", f"Workflow {workflow_id} not found")
+            return self._ok({"workflow_id": workflow_id, "deleted": True})
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Failed to delete workflow: {exc}")
+
+    def webhook_list_events(self, trigger_type: str | None = None, limit: int = 100) -> dict:
+        """List recent inbound webhook events."""
+        try:
+            from quant_exchange.webhooks import WebhookTriggerType
+
+            ttype = WebhookTriggerType(trigger_type) if trigger_type else None
+            events = self.platform.webhooks.list_events(trigger_type=ttype, limit=limit)
+            return self._ok({
+                "events": [
+                    {
+                        "event_id": e.event_id,
+                        "trigger_type": e.trigger_type.value,
+                        "verified": e.verified,
+                        "processed": e.processed,
+                        "received_at": e.received_at.isoformat(),
+                    }
+                    for e in events
+                ]
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Failed to list events: {exc}")
+
+    def webhook_send(
+        self,
+        url: str,
+        payload: dict,
+        secret: str = "",
+        headers: dict | None = None,
+        method: str = "POST",
+    ) -> dict:
+        """Send an outbound webhook (HOOK-02)."""
+        try:
+            delivery = self.platform.outbound_webhooks.enqueue(
+                url=url,
+                payload=payload,
+                secret=secret,
+                headers=headers,
+                method=method,
+            )
+            return self._ok({
+                "delivery_id": delivery.delivery_id,
+                "url": delivery.url,
+                "status": delivery.status.value,
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Failed to send webhook: {exc}")
+
+    def webhook_deliver_pending(self) -> dict:
+        """Process pending outbound webhook deliveries."""
+        try:
+            processed = 0
+            while True:
+                delivery = self.platform.outbound_webhooks.deliver_next()
+                if not delivery:
+                    break
+                processed += 1
+                if processed >= 10:  # Process max 10 per call
+                    break
+            return self._ok({"processed": processed})
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Failed to process deliveries: {exc}")
+
     def risk_dashboard(self) -> dict:
         """Return combined risk dashboard data including kill-switch status, alerts, and metrics."""
 
