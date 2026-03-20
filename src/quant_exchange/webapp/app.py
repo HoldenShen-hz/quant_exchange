@@ -568,6 +568,97 @@ class StockScreenerWebApp:
                     futures_positions=futures_positions,
                 ),
             )
+        # PF-01~PF-06: Portfolio Allocation API
+        if path == "/api/portfolio/allocator" and method == "POST":
+            payload = self._read_json(environ)
+            return self._json(
+                start_response,
+                self.platform.api.create_portfolio_allocator(
+                    allocator_type=payload.get("allocator_type", "equal_weight"),
+                    name=payload.get("name", "My Allocator"),
+                    description=payload.get("description", ""),
+                    max_weight=float(payload.get("max_weight", 0.3)),
+                    allow_short=bool(payload.get("allow_short", False)),
+                ),
+            )
+        if path == "/api/portfolio/allocation" and method == "POST":
+            payload = self._read_json(environ)
+            return self._json(
+                start_response,
+                self.platform.api.calculate_portfolio_allocation(
+                    allocator_config_id=payload.get("allocator_config_id", ""),
+                    expected_returns=payload.get("expected_returns", {}),
+                    volatilities=payload.get("volatilities", {}),
+                    correlations=payload.get("correlations", {}),
+                ),
+            )
+        if path == "/api/portfolio/rebalance" and method == "POST":
+            payload = self._read_json(environ)
+            return self._json(
+                start_response,
+                self.platform.api.calculate_rebalance_plan(
+                    target_weights=payload.get("target_weights", {}),
+                    current_weights=payload.get("current_weights", {}),
+                    current_prices=payload.get("current_prices", {}),
+                    notional=float(payload.get("notional", 100000)),
+                ),
+            )
+        if path == "/api/portfolio/exposure" and method == "GET":
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            # Parse positions from query params: positions=A:10,B:-5
+            positions = {}
+            for item in query.get("positions", [""])[0].split(","):
+                if ":" in item:
+                    k, v = item.split(":", 1)
+                    positions[k] = float(v)
+            prices = {}
+            for item in query.get("prices", [""])[0].split(","):
+                if ":" in item:
+                    k, v = item.split(":", 1)
+                    prices[k] = float(v)
+            return self._json(
+                start_response,
+                self.platform.api.get_risk_exposure_summary(prices=prices, positions=positions),
+            )
+        if path == "/api/portfolio/attribution" and method == "POST":
+            payload = self._read_json(environ)
+            return self._json(
+                start_response,
+                self.platform.api.get_attribution_analysis(
+                    portfolio_weights=payload.get("portfolio_weights", {}),
+                    benchmark_weights=payload.get("benchmark_weights", {}),
+                    portfolio_returns=payload.get("portfolio_returns", {}),
+                    benchmark_returns=payload.get("benchmark_returns", {}),
+                ),
+            )
+        # PF-06: Multi-Account API
+        if path == "/api/account/create" and method == "POST":
+            payload = self._read_json(environ)
+            return self._json(
+                start_response,
+                self.platform.api.create_multi_account(
+                    user_id=payload.get("user_id", "default"),
+                    account_type=payload.get("account_type", "primary"),
+                    initial_cash=float(payload.get("initial_cash", 0)),
+                ),
+            )
+        if path == "/api/account/summary" and method == "GET":
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            account_id = query.get("account_id", [""])[0]
+            return self._json(
+                start_response,
+                self.platform.api.get_multi_account_summary(account_id=account_id),
+            )
+        if path == "/api/account/transfer" and method == "POST":
+            payload = self._read_json(environ)
+            return self._json(
+                start_response,
+                self.platform.api.transfer_between_accounts(
+                    from_account_id=payload.get("from_account_id", ""),
+                    to_account_id=payload.get("to_account_id", ""),
+                    amount=float(payload.get("amount", 0)),
+                ),
+            )
         if method not in {"GET", "POST"}:
             return self._json(start_response, {"code": "METHOD_NOT_ALLOWED"}, status="405 Method Not Allowed")
         return self._json(start_response, {"code": "NOT_FOUND"}, status="404 Not Found")

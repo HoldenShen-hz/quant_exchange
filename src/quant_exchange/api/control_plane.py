@@ -1333,6 +1333,149 @@ class ControlPlaneAPI:
             order_type="market",
         )
 
+    # PF-01~PF-06: Portfolio Allocation & Risk Attribution API
+
+    def create_portfolio_allocator(
+        self,
+        *,
+        allocator_type: str,
+        name: str,
+        description: str = "",
+        max_weight: float = 0.3,
+        allow_short: bool = False,
+    ) -> dict:
+        """Create a portfolio allocator configuration (PF-01~PF-03)."""
+        from quant_exchange.enhanced.portfolio_allocators import AllocatorType
+        try:
+            at = AllocatorType(allocator_type)
+        except ValueError:
+            return self._error("BAD_REQUEST", f"Invalid allocator type: {allocator_type}")
+        config = self.platform.portfolio_allocator.create_allocator(
+            user_id="default",
+            allocator_type=at,
+            name=name,
+            description=description,
+            max_weight=max_weight,
+            allow_short=allow_short,
+        )
+        return self._ok(self._serialize(config))
+
+    def calculate_portfolio_allocation(
+        self,
+        *,
+        allocator_config_id: str,
+        expected_returns: dict[str, float],
+        volatilities: dict[str, float],
+        correlations: dict[str, float] | None = None,
+    ) -> dict:
+        """Calculate portfolio allocation based on allocator type (PF-02~PF-03)."""
+        config = self.platform.portfolio_allocator.get_allocator(allocator_config_id)
+        if not config:
+            return self._error("NOT_FOUND", f"Allocator config not found: {allocator_config_id}")
+        # Convert correlation keys from "A:B" to ("A", "B")
+        corr = {}
+        if correlations:
+            for k, v in correlations.items():
+                if ":" in k:
+                    parts = k.split(":")
+                    corr[(parts[0], parts[1])] = v
+                else:
+                    corr[k] = v
+        result = self.platform.portfolio_allocator.calculate_allocation(
+            allocator_config=config,
+            expected_returns=expected_returns,
+            volatilities=volatilities,
+            correlations=corr,
+        )
+        return self._ok(self._serialize(result))
+
+    def calculate_rebalance_plan(
+        self,
+        *,
+        target_weights: dict[str, float],
+        current_weights: dict[str, float],
+        current_prices: dict[str, float],
+        notional: float = 100000.0,
+    ) -> dict:
+        """Calculate rebalancing trades (PF-03)."""
+        plan = self.platform.portfolio_allocator.calculate_rebalance_plan(
+            portfolio_id="default",
+            target_weights=target_weights,
+            current_weights=current_weights,
+            current_prices=current_prices,
+            notional=notional,
+        )
+        return self._ok(self._serialize(plan))
+
+    def get_risk_exposure_summary(
+        self,
+        prices: dict[str, float],
+        positions: dict[str, float],
+    ) -> dict:
+        """Get aggregated risk exposure across strategies (PF-04)."""
+        # Record positions for aggregation
+        self.platform.risk_exposure.record_strategy_position(
+            strategy_id="default",
+            positions=positions,
+        )
+        exposure = self.platform.risk_exposure.aggregate_exposures(prices=prices)
+        return self._ok(self._serialize(exposure))
+
+    def get_attribution_analysis(
+        self,
+        portfolio_weights: dict[str, float],
+        benchmark_weights: dict[str, float],
+        portfolio_returns: dict[str, float],
+        benchmark_returns: dict[str, float],
+    ) -> dict:
+        """Get return attribution analysis (PF-05)."""
+        result = self.platform.attribution.brinson_attribution(
+            portfolio_weights=portfolio_weights,
+            benchmark_weights=benchmark_weights,
+            portfolio_returns=portfolio_returns,
+            benchmark_returns=benchmark_returns,
+        )
+        return self._ok(self._serialize(result))
+
+    def create_multi_account(
+        self,
+        *,
+        user_id: str,
+        account_type: str = "primary",
+        initial_cash: float = 0.0,
+    ) -> dict:
+        """Create a trading account for multi-account management (PF-06)."""
+        account = self.platform.multi_account.create_account(
+            user_id=user_id,
+            account_type=account_type,
+            initial_cash=initial_cash,
+        )
+        return self._ok(self._serialize(account))
+
+    def get_multi_account_summary(self, account_id: str) -> dict:
+        """Get multi-account summary."""
+        summary = self.platform.multi_account.get_account_summary(account_id)
+        if not summary:
+            return self._error("NOT_FOUND", f"Account not found: {account_id}")
+        return self._ok(summary)
+
+    def transfer_between_accounts(
+        self,
+        *,
+        from_account_id: str,
+        to_account_id: str,
+        amount: float,
+    ) -> dict:
+        """Transfer funds between accounts (PF-06)."""
+        transfer = self.platform.multi_account.transfer_funds(
+            from_account_id=from_account_id,
+            to_account_id=to_account_id,
+            amount=amount,
+        )
+        if not transfer:
+            return self._error("BAD_REQUEST", "Transfer failed - check account balances")
+        return self._ok(self._serialize(transfer))
+
     def _serialize(self, value: Any) -> Any:
         if is_dataclass(value):
             return asdict(value)

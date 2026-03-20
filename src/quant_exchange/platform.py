@@ -28,6 +28,12 @@ from quant_exchange.enhanced import (
     ResearchMlService,
     UniverseService,
 )
+from quant_exchange.enhanced.portfolio_allocators import (
+    PortfolioAllocatorService,
+    RiskExposureAggregator,
+    AttributionAnalyzer,
+    MultiAccountAllocator,
+)
 from quant_exchange.execution.oms import OrderManager, PaperExecutionEngine
 from quant_exchange.ingestion.background_downloader import HistoryDownloadSupervisor
 from quant_exchange.intelligence.service import IntelligenceEngine
@@ -92,6 +98,11 @@ class QuantTradingPlatform:
         )
         self.bot_center = StrategyBotService(self.persistence, self.stocks)
         self.web_workspace = WebWorkspaceService(self.persistence)
+        # PF-01~PF-06: Portfolio allocation and risk attribution
+        self.portfolio_allocator = PortfolioAllocatorService(self.persistence)
+        self.risk_exposure = RiskExposureAggregator()
+        self.attribution = AttributionAnalyzer()
+        self.multi_account = MultiAccountAllocator(self.persistence)
         self._register_default_adapters()
         self.crypto = CryptoWorkbenchService(self.adapters, self.market_data)
         self.futures = FuturesWorkbenchService(self.adapters, self.market_data)
