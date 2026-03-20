@@ -396,7 +396,15 @@ class StockScreenerWebApp:
                     status="400 Bad Request",
                 )
             result = self.platform.api.start_strategy_bot(bot_id)
-            self._broadcast_sse({"type": "bot_state_changed", "bot_id": bot_id, "action": "started"})
+            # BOT-03: Broadcast full bot state with PnL data
+            if result.get("code") == "OK":
+                bot_data = result.get("data", {})
+                self._broadcast_sse({
+                    "type": "bot_state_changed",
+                    "bot_id": bot_id,
+                    "action": "started",
+                    "bot": bot_data,
+                })
             return self._json(start_response, result)
         if path == "/api/bots/pause" and method == "POST":
             payload = self._read_json(environ)
@@ -408,7 +416,14 @@ class StockScreenerWebApp:
                     status="400 Bad Request",
                 )
             result = self.platform.api.pause_strategy_bot(bot_id)
-            self._broadcast_sse({"type": "bot_state_changed", "bot_id": bot_id, "action": "paused"})
+            if result.get("code") == "OK":
+                bot_data = result.get("data", {})
+                self._broadcast_sse({
+                    "type": "bot_state_changed",
+                    "bot_id": bot_id,
+                    "action": "paused",
+                    "bot": bot_data,
+                })
             return self._json(start_response, result)
         if path == "/api/bots/stop" and method == "POST":
             payload = self._read_json(environ)
@@ -420,7 +435,14 @@ class StockScreenerWebApp:
                     status="400 Bad Request",
                 )
             result = self.platform.api.stop_strategy_bot(bot_id)
-            self._broadcast_sse({"type": "bot_state_changed", "bot_id": bot_id, "action": "stopped"})
+            if result.get("code") == "OK":
+                bot_data = result.get("data", {})
+                self._broadcast_sse({
+                    "type": "bot_state_changed",
+                    "bot_id": bot_id,
+                    "action": "stopped",
+                    "bot": bot_data,
+                })
             return self._json(start_response, result)
         if path == "/api/bots/interact" and method == "POST":
             payload = self._read_json(environ)
@@ -436,6 +458,25 @@ class StockScreenerWebApp:
                 start_response,
                 self.platform.api.interact_strategy_bot(bot_id, command, payload.get("payload") or {}),
             )
+        # BOT-02: Dedicated parameter update endpoint
+        if path == "/api/bots/params" and method == "POST":
+            payload = self._read_json(environ)
+            bot_id = payload.get("bot_id", "")
+            params = payload.get("params", {})
+            if not bot_id:
+                return self._json(
+                    start_response,
+                    {"code": "BAD_REQUEST", "error": {"message": "bot_id is required."}},
+                    status="400 Bad Request",
+                )
+            result = self.platform.api.update_strategy_bot_params(bot_id, params)
+            self._broadcast_sse({"type": "bot_params_updated", "bot_id": bot_id})
+            return self._json(start_response, result)
+        # BOT-03: Bot detail endpoint with PnL
+        if path.startswith("/api/bots/") and path.endswith("/detail") and method == "GET":
+            bot_id = path[len("/api/bots/"):-len("/detail")]
+            result = self.platform.api.get_strategy_bot_details(bot_id)
+            return self._json(start_response, result)
         if path == "/api/notifications" and method == "GET":
             query = parse_qs(environ.get("QUERY_STRING", ""))
             limit = int(query.get("limit", ["20"])[0])

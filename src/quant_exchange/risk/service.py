@@ -455,6 +455,303 @@ class RiskEngine:
         """Return margin warning states for all instruments."""
         return dict(self._margin_states)
 
+    # ── RK-06: Black Swan Protection ─────────────────────────────────────────
+
+    def calculate_cornish_fisher_var(
+        self,
+        returns: list[float],
+        confidence: float = 0.95,
+    ) -> float:
+        """Calculate Value-at-Risk using the Cornish-Fisher expansion (RK-06).
+
+        Adjusts the standard normal quantile for sample skewness and excess
+        kurtosis, providing a more accurate VaR estimate for fat-tailed
+        (leptokurtic) return distributions common during market crises.
+
+        Uses the formula:
+          z_cf = z + (z^2 - 1)*S/6 + (z^3 - 3z)*K/24 - (2z^3 - 5z)*S^2/36
+
+        where z = normal quantile, S = skewness, K = excess kurtosis.
+        """
+        import math
+        if len(returns) < 10:
+            return 0.0
+
+        n = len(returns)
+        mean_r = sum(returns) / n
+        var_r = sum((r - mean_r) ** 2 for r in returns) / n
+        std_r = var_r ** 0.5
+
+        if std_r == 0:
+            return 0.0
+
+        # Skewness: E[(r - mu)^3] / sigma^3
+        skew = sum((r - mean_r) ** 3 for r in returns) / (n * std_r ** 3)
+        # Excess kurtosis: E[(r - mu)^4] / sigma^4 - 3
+        kurt = sum((r - mean_r) ** 4 for r in returns) / (n * std_r ** 4) - 3
+
+        # Normal quantile for confidence level
+        z = self._normal_quantile(confidence)
+
+        # Cornish-Fisher adjustment
+        z_cf = (
+            z
+            + (z * z - 1) * skew / 6
+            + (z * z * z - 3 * z) * kurt / 24
+            - (2 * z * z * z - 5 * z) * skew * skew / 36
+        )
+
+        var_pct = -(mean_r + z_cf * std_r)
+        return round(var_pct, 6)
+
+    def calculate_expected_shortfall(
+        self,
+        returns: list[float],
+        confidence: float = 0.95,
+    ) -> float:
+        """Calculate Expected Shortfall (CVaR/ES) at the given confidence level (RK-06).
+
+        ES is the mean of all losses beyond VaR, providing a more complete
+        picture of tail risk than VaR alone.
+        """
+        import math
+        if len(returns) < 5:
+            return 0.0
+
+        sorted_returns = sorted(returns)
+        n = len(sorted_returns)
+        cutoff_idx = int(n * (1 - confidence))
+        cutoff_idx = max(1, cutoff_idx)
+
+        # Tail losses (the worst `cutoff_idx` returns, expressed as losses)
+        tail_losses = [-r for r in sorted_returns[:cutoff_idx] if r < 0]
+
+        if not tail_losses:
+            return 0.0
+
+        es = sum(tail_losses) / len(tail_losses)
+        return round(es, 6)
+
+    def check_circuit_breakers(
+        self,
+        price_history: list[float],
+        symbol: str,
+        *,
+        level1_threshold: float = 0.05,   # 5% drop → Level 1 halt warning
+        level2_threshold: float = 0.10,   # 10% drop → Level 2 halt
+        level3_threshold: float = 0.20,   # 20% drop → Level 3 market-wide halt
+    ) -> dict[str, Any]:
+        """Check circuit breaker levels based on today's opening price (RK-06).
+
+        Returns the triggered circuit breaker level (if any) and recommended actions.
+        Standard Chinese/US futures circuit breaker rules:
+        - Level 1 (5% down): 15-minute cooling-off period
+        - Level 2 (10% down): 15-minute halt, then 5-min reopen
+        - Level 3 (20% down): Full market halt for remainder of session
+        """
+        import math
+        if len(price_history) < 2:
+            return {"level": 0, "triggered": False, "pct_decline": 0.0}
+
+        open_price = price_history[0]
+        current_price = price_history[-1]
+
+        if open_price <= 0:
+            return {"level": 0, "triggered": False, "pct_decline": 0.0}
+
+        pct_decline = (open_price - current_price) / open_price
+
+        level = 0
+        if pct_decline >= level3_threshold:
+            level = 3
+        elif pct_decline >= level2_threshold:
+            level = 2
+        elif pct_decline >= level1_threshold:
+            level = 1
+
+        triggered = level > 0
+
+        if triggered:
+            self._record_alert(
+                code=f"circuit_breaker_L{level}",
+                severity=AlertSeverity.EMERGENCY if level == 3 else AlertSeverity.CRITICAL,
+                message=f"Circuit breaker Level {level} triggered for {symbol}: decline {pct_decline:.2%}",
+                context={
+                    "symbol": symbol,
+                    "level": level,
+                    "pct_decline": round(pct_decline, 6),
+                    "open_price": open_price,
+                    "current_price": current_price,
+                    "threshold_L1": level1_threshold,
+                    "threshold_L2": level2_threshold,
+                    "threshold_L3": level3_threshold,
+                },
+            )
+
+        actions = {1: "cooling_off_period", 2: "15min_halt", 3: "full_halt"}
+        return {
+            "level": level,
+            "triggered": triggered,
+            "pct_decline": round(pct_decline, 6),
+            "symbol": symbol,
+            "open_price": open_price,
+            "current_price": current_price,
+            "recommended_action": actions.get(level, "continue_trading"),
+        }
+
+    def detect_correlation_spike(
+        self,
+        returns_matrix: dict[str, list[float]],
+        *,
+        spike_threshold: float = 0.70,
+        window: int = 20,
+    ) -> dict[str, Any]:
+        """Detect when cross-instrument correlations spike above a threshold (RK-06).
+
+        During market stress (black swan events), correlations tend to 1.0
+        as all assets sell off simultaneously. This detects such spikes by
+        computing the average pairwise correlation in a rolling window and
+        flagging when it exceeds spike_threshold.
+
+        Returns average correlation, spike status, and contributing pairs.
+        """
+        import math
+        tickers = list(returns_matrix.keys())
+        if len(tickers) < 2:
+            return {"spike_detected": False, "avg_correlation": 0.0, "pairs": []}
+
+        # Build correlation matrix using latest `window` returns
+        corrs: list[float] = []
+        spike_pairs: list[dict[str, Any]] = []
+
+        for i in range(len(tickers)):
+            for j in range(i + 1, len(tickers)):
+                tki, tkj = tickers[i], tickers[j]
+                ri = returns_matrix[tki][-window:]
+                rj = returns_matrix[tkj][-window:]
+
+                if len(ri) < window or len(rj) < window:
+                    continue
+
+                corr = self._pearson_corr(ri, rj)
+                corrs.append(corr)
+
+                if corr >= spike_threshold:
+                    spike_pairs.append({
+                        "pair": f"{tki}/{tkj}",
+                        "correlation": round(corr, 4),
+                    })
+
+        if not corrs:
+            return {"spike_detected": False, "avg_correlation": 0.0, "pairs": []}
+
+        avg_corr = sum(corrs) / len(corrs)
+        spike_detected = avg_corr >= spike_threshold or any(c >= spike_threshold for c in corrs)
+
+        if spike_detected:
+            self._record_alert(
+                code="correlation_spike",
+                severity=AlertSeverity.CRITICAL,
+                message=f"Correlation spike detected: avg={avg_corr:.3f}, {len(spike_pairs)} pairs above {spike_threshold:.0%}",
+                context={"avg_correlation": round(avg_corr, 4), "spike_pairs": spike_pairs},
+            )
+
+        return {
+            "spike_detected": spike_detected,
+            "avg_correlation": round(avg_corr, 4),
+            "max_correlation": round(max(corrs), 4) if corrs else 0.0,
+            "threshold": spike_threshold,
+            "window": window,
+            "spike_pairs": spike_pairs,
+        }
+
+    def calculate_conditional_drawdown_risk(
+        self,
+        equity_curve: list[float],
+        confidence: float = 0.95,
+    ) -> float:
+        """Calculate Conditional Drawdown at Risk (CDaR) (RK-06).
+
+        Average expected drawdown conditional on being in a drawdown state
+        at the given confidence level.
+        """
+        import math
+        if len(equity_curve) < 10:
+            return 0.0
+
+        # Compute drawdown series
+        highs = [equity_curve[0]]
+        for p in equity_curve[1:]:
+            highs.append(max(highs[-1], p))
+
+        drawdowns = [(highs[i] - equity_curve[i]) / highs[i] if highs[i] > 0 else 0.0 for i in range(len(equity_curve))]
+        drawdowns = [d for d in drawdowns if d > 0]
+
+        if not drawdowns:
+            return 0.0
+
+        sorted_dd = sorted(drawdowns, reverse=True)
+        n = len(sorted_dd)
+        cutoff_idx = max(1, int(n * (1 - confidence)))
+        cdar = sum(sorted_dd[:cutoff_idx]) / len(sorted_dd[:cutoff_idx]) if sorted_dd[:cutoff_idx] else 0.0
+        return round(cdar, 6)
+
+    # ── Internal Helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _normal_quantile(p: float) -> float:
+        """Approximate inverse normal CDF (quantile) using rational approximation."""
+        import math
+        if p <= 0:
+            return -float("inf")
+        if p >= 1:
+            return float("inf")
+        if p < 0.5:
+            t = (-2.0 * math.log(p)) ** 0.5
+            # Rational approximation numerator and denominator for p < 0.5
+            a = 0.000248 + 0.036348
+            b = -0.020523
+            c = 0.128379
+            d = -0.218519
+            num = ((a * t + b) * t + c) * t + d
+            e = t + 0.968978
+            f = 0.303447
+            g = 1.260083
+            h = 1.265512
+            den = ((e * t + f) * t + g) / h
+            z = -(num / den)
+        else:
+            t = (-2.0 * math.log(1.0 - p)) ** 0.5
+            # Rational approximation numerator and denominator for p >= 0.5
+            a = -0.000248 + 0.036348
+            b = -0.020523
+            c = 0.128379
+            d = -0.218519
+            num = ((a * t + b) * t + c) * t + d
+            e = t + 0.968978
+            f = 0.303447
+            g = 1.260083
+            h = 1.265512
+            den = ((e * t + f) * t + g) / h
+            z = num / den
+        return z
+
+    @staticmethod
+    def _pearson_corr(x: list[float], y: list[float]) -> float:
+        """Compute Pearson correlation coefficient between two series."""
+        import math
+        n = len(x)
+        if n == 0 or n != len(y):
+            return 0.0
+        mean_x = sum(x) / n
+        mean_y = sum(y) / n
+        num = sum((xi - mean_x) * (yi - mean_y) for xi, yi in zip(x, y))
+        den_x = sum((xi - mean_x) ** 2 for xi in x) ** 0.5
+        den_y = sum((yi - mean_y) ** 2 for yi in y) ** 0.5
+        if den_x == 0 or den_y == 0:
+            return 0.0
+        return num / (den_x * den_y)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RK-03: Instrument-Level Risk Controls (Liquidity & Volatility Filtering)

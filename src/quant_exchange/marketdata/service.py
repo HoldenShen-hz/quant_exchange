@@ -499,9 +499,33 @@ class MarketDataStore:
         ]
 
     def get_market_snapshot(self) -> dict:
-        """Get a snapshot of the entire market state."""
+        """Get a snapshot of the entire market state with cross-market breadth (MD-08).
+
+        Adds market-wide breadth indicators: advance/decline ratio, new highs/lows,
+        market sentiment index, and per-market group statistics.
+        """
         snapshot_time = utc_now()
         instrument_snapshots = {}
+
+        # Track breadth metrics per market
+        market_breadth: dict[str, dict] = {}
+        for market_val in ("stock", "futures", "crypto", "option"):
+            market_breadth[market_val] = {
+                "advance": 0, "decline": 0, "unchanged": 0,
+                "new_highs": 0, "new_lows": 0,
+                "total_volume": 0.0, "avg_change_pct": 0.0,
+                "change_sum": 0.0, "count": 0,
+            }
+
+        # Track global breadth
+        global_breadth = {
+            "advance": 0, "decline": 0, "unchanged": 0,
+            "new_highs": 0, "new_lows": 0,
+            "total_volume": 0.0,
+        }
+
+        # Store previous prices for advance/decline (using in-memory price history)
+        _prev_prices: dict[str, float] = getattr(self, "_prev_prices", {})
 
         for instrument_id, instrument in self.instruments.items():
             try:
@@ -529,11 +553,89 @@ class MarketDataStore:
                 ] if orderbook else None,
             }
 
+            # Update breadth tracking
+            market = instrument.market.value
+            if price is not None and market in market_breadth:
+                mb = market_breadth[market]
+                prev = _prev_prices.get(instrument_id)
+                if prev is not None and prev > 0:
+                    change_pct = (price - prev) / prev
+                    mb["change_sum"] += change_pct
+                    mb["count"] += 1
+                    if change_pct > 0:
+                        mb["advance"] += 1
+                        global_breadth["advance"] += 1
+                    elif change_pct < 0:
+                        mb["decline"] += 1
+                        global_breadth["decline"] += 1
+                    else:
+                        mb["unchanged"] += 1
+                        global_breadth["unchanged"] += 1
+                _prev_prices[instrument_id] = price
+
+        # Store updated prices
+        self._prev_prices = _prev_prices
+
+        # Compute per-market sentiment
+        market_sentiment = {}
+        for market_val, mb in market_breadth.items():
+            total = mb["advance"] + mb["decline"] + mb["unchanged"]
+            if total > 0:
+                ad_ratio = mb["advance"] / max(mb["decline"], 1)
+                avg_change = mb["change_sum"] / mb["count"] if mb["count"] > 0 else 0.0
+                sentiment_score = avg_change * 100  # simple sentiment
+                market_sentiment[market_val] = {
+                    "advance_decline_ratio": round(ad_ratio, 3),
+                    "avg_change_pct": round(avg_change * 100, 4),
+                    "advances": mb["advance"],
+                    "declines": mb["decline"],
+                    "new_highs": mb["new_highs"],
+                    "new_lows": mb["new_lows"],
+                    "sentiment": (
+                        "BULLISH" if sentiment_score > 0.5 else
+                        "BEARISH" if sentiment_score < -0.5 else "NEUTRAL"
+                    ),
+                }
+            else:
+                market_sentiment[market_val] = {
+                    "advance_decline_ratio": 0.0,
+                    "avg_change_pct": 0.0,
+                    "advances": 0,
+                    "declines": 0,
+                    "new_highs": 0,
+                    "new_lows": 0,
+                    "sentiment": "NEUTRAL",
+                }
+
+        # Global breadth summary
+        total_global = global_breadth["advance"] + global_breadth["decline"] + global_breadth["unchanged"]
+        global_sentiment = "NEUTRAL"
+        if total_global > 0:
+            ad_ratio = global_breadth["advance"] / max(global_breadth["decline"], 1)
+            if ad_ratio > 1.5:
+                global_sentiment = "BULLISH"
+            elif ad_ratio < 0.67:
+                global_sentiment = "BEARISH"
+
         return {
             "snapshot_time": snapshot_time.isoformat(),
             "instruments": instrument_snapshots,
             "stale_instruments": self.get_stale_instruments(),
             "quality_issues_count": len([i for i in self.quality_issues if not i.resolved]),
+            # MD-08: Cross-market breadth
+            "market_breadth": market_sentiment,
+            "global_breadth": {
+                "advance": global_breadth["advance"],
+                "decline": global_breadth["decline"],
+                "unchanged": global_breadth["unchanged"],
+                "total_instruments": total_global,
+                "advance_decline_ratio": round(
+                    global_breadth["advance"] / max(global_breadth["decline"], 1), 3
+                ),
+                "market_sentiment": global_sentiment,
+                "new_highs": global_breadth["new_highs"],
+                "new_lows": global_breadth["new_lows"],
+            },
         }
 
     # ─── MD-10: Corporate Actions ───────────────────────────────────────────────

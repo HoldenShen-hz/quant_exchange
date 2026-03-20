@@ -176,25 +176,365 @@ class ReportingService:
             "trade_count": len(fills),
         }
 
+    # ── Drift Analysis (RP-03 + PP-06) ─────────────────────────────────────────
+
+    def slippage_analysis(
+        self,
+        *,
+        fills: list[Fill],
+        signal_prices: dict[str, float] | None = None,
+    ) -> dict:
+        """Analyze per-trade slippage vs signal prices (RP-03).
+
+        Args:
+            fills: List of executed fills.
+            signal_prices: Dict of instrument_id → signal/scheduled price.
+                           If None, uses the arrival price (open of next bar) as benchmark.
+        Returns:
+            Per-trade slippage breakdown and aggregate statistics.
+        """
+        if not fills:
+            return {"total_trades": 0, "avg_slippage_bps": 0.0, "slippage_by_trade": []}
+
+        slippage_by_trade = []
+        total_slippage_bps = 0.0
+        total_slippage_abs = 0.0
+
+        for fill in fills:
+            # Use signal price if provided, otherwise mark as "benchmark unavailable"
+            if signal_prices and fill.instrument_id in signal_prices:
+                benchmark = signal_prices[fill.instrument_id]
+                if benchmark > 0:
+                    slippage_abs = fill.price - benchmark
+                    slippage_bps = (slippage_abs / benchmark) * 10000
+                    # Positive slippage = worse execution (paid more than signal)
+                    direction = "adverse" if ((fill.side == OrderSide.BUY and slippage_abs > 0) or
+                                              (fill.side == OrderSide.SELL and slippage_abs < 0)) else "favorable"
+                else:
+                    slippage_bps = 0.0
+                    slippage_abs = 0.0
+                    direction = "unknown"
+            else:
+                slippage_bps = 0.0
+                slippage_abs = 0.0
+                direction = "no_benchmark"
+
+            total_slippage_bps += slippage_bps
+            total_slippage_abs += slippage_abs
+            slippage_by_trade.append({
+                "fill_id": fill.fill_id,
+                "instrument_id": fill.instrument_id,
+                "side": fill.side.value,
+                "exec_price": fill.price,
+                "benchmark_price": signal_prices.get(fill.instrument_id) if signal_prices else None,
+                "slippage_bps": round(slippage_bps, 2),
+                "slippage_abs": round(slippage_abs, 6),
+                "direction": direction,
+                "fee": fill.fee,
+                "timestamp": fill.timestamp.isoformat(),
+            })
+
+        n = len(fills)
+        return {
+            "total_trades": n,
+            "avg_slippage_bps": round(total_slippage_bps / n, 2),
+            "total_slippage_bps": round(total_slippage_bps, 2),
+            "total_slippage_abs": round(total_slippage_abs, 6),
+            "adverse_trades": sum(1 for t in slippage_by_trade if t["direction"] == "adverse"),
+            "favorable_trades": sum(1 for t in slippage_by_trade if t["direction"] == "favorable"),
+            "slippage_by_trade": slippage_by_trade,
+        }
+
+    def signal_divergence(
+        self,
+        *,
+        backtest_signals: list[dict],
+        live_signals: list[dict],
+    ) -> dict:
+        """Detect signal divergence between backtest and live (RP-03, PP-06).
+
+        Compares signal timing and direction at matching timestamps.
+        Returns per-signal and aggregate divergence metrics.
+        """
+        if not backtest_signals or not live_signals:
+            return {"divergence_score": 0.0, "signal_count": 0, "divergent_signals": []}
+
+        # Index live signals by instrument + timestamp for matching
+        live_index: dict[tuple, dict] = {}
+        for sig in live_signals:
+            key = (sig.get("instrument_id", ""), sig.get("timestamp"))
+            live_index[key] = sig
+
+        divergent_signals = []
+        timing_diffs = []
+        direction_mismatches = 0
+
+        for bt_sig in backtest_signals:
+            key = (bt_sig.get("instrument_id", ""), bt_sig.get("timestamp"))
+            matching_live = live_index.get(key)
+
+            if matching_live is None:
+                # Missing in live - signal was dropped
+                divergent_signals.append({
+                    "instrument_id": bt_sig.get("instrument_id"),
+                    "timestamp": bt_sig.get("timestamp"),
+                    "backtest_signal": bt_sig.get("direction"),
+                    "live_signal": None,
+                    "status": "dropped_in_live",
+                    "signal_value_bt": bt_sig.get("value"),
+                })
+                continue
+
+            # Compare direction
+            bt_dir = bt_sig.get("direction")
+            live_dir = matching_live.get("direction")
+            if bt_dir != live_dir:
+                direction_mismatches += 1
+                divergent_signals.append({
+                    "instrument_id": bt_sig.get("instrument_id"),
+                    "timestamp": bt_sig.get("timestamp"),
+                    "backtest_signal": bt_dir,
+                    "live_signal": live_dir,
+                    "status": "direction_mismatch",
+                    "signal_value_bt": bt_sig.get("value"),
+                    "signal_value_live": matching_live.get("value"),
+                })
+
+            # Timing diff
+            if "signal_time" in bt_sig and "signal_time" in matching_live:
+                try:
+                    t_bt = bt_sig["signal_time"]
+                    t_live = matching_live["signal_time"]
+                    if isinstance(t_bt, datetime) and isinstance(t_live, datetime):
+                        diff_ms = abs((t_live - t_bt).total_seconds() * 1000)
+                        timing_diffs.append(diff_ms)
+                except Exception:
+                    pass
+
+        n = len(backtest_signals)
+        divergence_score = (direction_mismatches + len(divergent_signals)) / n if n > 0 else 0.0
+        avg_timing_diff_ms = sum(timing_diffs) / len(timing_diffs) if timing_diffs else 0.0
+
+        return {
+            "divergence_score": round(divergence_score, 4),
+            "signal_count": n,
+            "direction_mismatches": direction_mismatches,
+            "divergent_signals": divergent_signals,
+            "avg_timing_diff_ms": round(avg_timing_diff_ms, 2),
+            "max_timing_diff_ms": round(max(timing_diffs), 2) if timing_diffs else 0.0,
+        }
+
+    def drift_score(
+        self,
+        *,
+        backtest_equity: list[tuple[Any, float]],
+        live_equity: list[tuple[Any, float]],
+        backtest_trades: list[Fill] | None = None,
+        live_trades: list[Fill] | None = None,
+        signal_prices: dict[str, float] | None = None,
+    ) -> dict:
+        """Calculate composite drift score between backtest and live (RP-03, PP-06).
+
+        Combines equity deviation, slippage, and signal divergence into a single
+        actionable drift score (0-100, higher = more drift).
+        """
+        if not backtest_equity or not live_equity:
+            return {"drift_score": 0.0, "components": {}}
+
+        # 1. Equity deviation component (40% weight)
+        bt_values = [e for _, e in backtest_equity]
+        live_values = [e for _, e in live_equity]
+        min_len = min(len(bt_values), len(live_values))
+
+        if min_len >= 2:
+            bt_returns = [(bt_values[i+1] - bt_values[i]) / bt_values[i]
+                          for i in range(min_len - 1) if bt_values[i] != 0]
+            live_returns = [(live_values[i+1] - live_values[i]) / live_values[i]
+                            for i in range(min_len - 1) if live_values[i] != 0]
+            if bt_returns and live_returns:
+                mean_bt = sum(bt_returns) / len(bt_returns)
+                mean_live = sum(live_returns) / len(live_returns)
+                return_diff = abs(mean_live - mean_bt)
+                equity_drift = min(return_diff * 1000, 1.0)  # Normalize to [0,1]
+            else:
+                equity_drift = 0.0
+        else:
+            equity_drift = 0.0
+
+        # 2. Slippage component (30% weight)
+        slippage_component = 0.0
+        if backtest_trades and live_trades:
+            # Compare slippage between backtest and live fills
+            bt_slip = self.slippage_analysis(fills=backtest_trades, signal_prices=signal_prices)
+            live_slip = self.slippage_analysis(fills=live_trades, signal_prices=signal_prices)
+            slippage_diff = abs(bt_slip["avg_slippage_bps"] - live_slip["avg_slippage_bps"])
+            slippage_component = min(slippage_diff / 50, 1.0)  # 50bps threshold → 1.0
+        elif live_trades:
+            live_slip = self.slippage_analysis(fills=live_trades, signal_prices=signal_prices)
+            slippage_component = min(abs(live_slip["avg_slippage_bps"]) / 50, 1.0)
+
+        # 3. Final equity deviation (30% weight)
+        bt_final = backtest_equity[-1][1]
+        live_final = live_equity[-1][1]
+        final_deviation = abs((live_final - bt_final) / bt_final) if bt_final > 0 else 0.0
+        final_drift = min(final_deviation * 10, 1.0)  # 10% deviation → 1.0
+
+        # Composite score (0-100)
+        composite = (0.40 * equity_drift + 0.30 * slippage_component + 0.30 * final_drift) * 100
+
+        return {
+            "drift_score": round(composite, 2),
+            "components": {
+                "equity_drift_normalized": round(equity_drift, 4),
+                "slippage_component_normalized": round(slippage_component, 4),
+                "final_deviation_normalized": round(final_drift, 4),
+            },
+            "raw_metrics": {
+                "final_deviation_pct": round(final_deviation * 100, 4),
+                "avg_backtest_return": round(mean_bt * 100, 4) if 'mean_bt' in dir() else None,
+                "avg_live_return": round(mean_live * 100, 4) if 'mean_live' in dir() else None,
+            },
+            "drift_level": (
+                "LOW" if composite < 20 else
+                "MEDIUM" if composite < 50 else
+                "HIGH" if composite < 80 else "CRITICAL"
+            ),
+        }
+
+    def drift_recommendations(
+        self,
+        drift_result: dict,
+        slippage_result: dict | None = None,
+        divergence_result: dict | None = None,
+    ) -> list[dict]:
+        """Generate actionable recommendations based on drift analysis (RP-03, PP-06)."""
+        recommendations = []
+        score = drift_result.get("drift_score", 0)
+        level = drift_result.get("drift_level", "LOW")
+
+        # Drift-level recommendations
+        if score >= 80:
+            recommendations.append({
+                "priority": "CRITICAL",
+                "action": "Suspend live trading immediately",
+                "reason": f"Drift score {score} exceeds 80 — severe deviation from backtest",
+            })
+        elif score >= 50:
+            recommendations.append({
+                "priority": "HIGH",
+                "action": "Reduce position sizes by 50%",
+                "reason": f"Drift score {score} indicates significant execution drift",
+            })
+
+        if level in ("HIGH", "CRITICAL"):
+            recommendations.append({
+                "priority": "HIGH",
+                "action": "Review fill allocation and commission models",
+                "reason": "Execution quality has diverged significantly from backtest assumptions",
+            })
+
+        # Slippage-based recommendations
+        if slippage_result:
+            avg_slip = slippage_result.get("avg_slippage_bps", 0)
+            adverse_count = slippage_result.get("adverse_trades", 0)
+            total = slippage_result.get("total_trades", 0)
+            if total > 0 and adverse_count / total > 0.5:
+                recommendations.append({
+                    "priority": "MEDIUM",
+                    "action": "Review order routing and liquidity provider settings",
+                    "reason": f"{adverse_count}/{total} trades executed adversely vs signal price",
+                })
+            if abs(avg_slip) > 20:  # 20bps threshold
+                recommendations.append({
+                    "priority": "MEDIUM",
+                    "action": "Tighten spread assumptions in backtest commission model",
+                    "reason": f"Average slippage {avg_slip:.2f}bps significantly exceeds backtest",
+                })
+
+        # Divergence-based recommendations
+        if divergence_result:
+            div_score = divergence_result.get("divergence_score", 0)
+            mismatches = divergence_result.get("direction_mismatches", 0)
+            if mismatches > 0:
+                recommendations.append({
+                    "priority": "HIGH",
+                    "action": "Audit signal generation — direction mismatches detected",
+                    "reason": f"{mismatches} signals changed direction between backtest and live",
+                })
+            if div_score > 0.3:
+                recommendations.append({
+                    "priority": "MEDIUM",
+                    "action": "Review market data feed latency and data一致性",
+                    "reason": f"Signal divergence score {div_score:.2%} indicates data or timing issues",
+                })
+
+        if not recommendations:
+            recommendations.append({
+                "priority": "INFO",
+                "action": "No immediate action required",
+                "reason": "Drift metrics within normal ranges",
+            })
+
+        return recommendations
+
     def bias_report(
         self,
         *,
         backtest_equity: list[tuple[Any, float]],
         live_equity: list[tuple[Any, float]],
+        backtest_trades: list[Fill] | None = None,
+        live_trades: list[Fill] | None = None,
+        signal_prices: dict[str, float] | None = None,
+        backtest_signals: list[dict] | None = None,
+        live_signals: list[dict] | None = None,
     ) -> dict:
-        """Compare backtest vs live equity curves to measure execution bias."""
+        """Compare backtest vs live with enhanced drift analysis (RP-03, PP-06).
 
+        Now includes per-trade slippage breakdown, signal divergence detection,
+        composite drift score, and actionable recommendations.
+        """
         if not backtest_equity or not live_equity:
             return {"tracking_error": 0.0, "final_deviation": 0.0}
+
         bt_final = backtest_equity[-1][1]
         live_final = live_equity[-1][1]
         deviation = (live_final - bt_final) / bt_final if bt_final > 0 else 0.0
+
+        # Compute drift score
+        drift = self.drift_score(
+            backtest_equity=backtest_equity,
+            live_equity=live_equity,
+            backtest_trades=backtest_trades,
+            live_trades=live_trades,
+            signal_prices=signal_prices,
+        )
+
+        # Slippage analysis
+        slippage = None
+        if live_trades:
+            slippage = self.slippage_analysis(fills=live_trades, signal_prices=signal_prices)
+
+        # Signal divergence
+        divergence = None
+        if backtest_signals and live_signals:
+            divergence = self.signal_divergence(
+                backtest_signals=backtest_signals,
+                live_signals=live_signals,
+            )
+
+        # Recommendations
+        recommendations = self.drift_recommendations(drift, slippage, divergence)
+
         return {
             "backtest_final_equity": round(bt_final, 6),
             "live_final_equity": round(live_final, 6),
             "final_deviation": round(deviation, 6),
             "backtest_periods": len(backtest_equity),
             "live_periods": len(live_equity),
+            "drift_score": drift,
+            "slippage_analysis": slippage,
+            "signal_divergence": divergence,
+            "recommendations": recommendations,
         }
 
     def trade_detail_report(

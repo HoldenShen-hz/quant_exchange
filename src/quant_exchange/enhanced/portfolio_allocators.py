@@ -1039,6 +1039,219 @@ class AttributionAnalyzer:
         sorted_items = sorted(contributions.items(), key=lambda x: x[1], reverse=True)
         return sorted_items[:n], sorted_items[-n:]
 
+    # ── PF-05: Volatility Attribution ───────────────────────────────────────
+
+    def volatility_attribution(
+        self,
+        positions: dict[str, dict[str, float]],
+        volatilities: dict[str, float],
+        correlations: dict[tuple[str, str], float],
+        weights: dict[str, float],
+    ) -> dict[str, Any]:
+        """Decompose portfolio volatility into contributing factors (PF-05).
+
+        Uses the classic formula:
+          portfolio_vol = sqrt(sum_ij(w_i * w_j * vol_i * vol_j * corr_ij))
+
+        Returns per-position contribution to total portfolio volatility.
+        """
+        tickers = list(weights.keys())
+        n = len(tickers)
+        if n == 0:
+            return {"total_volatility": 0.0, "contributions": {}, "marginal_contributions": {}}
+
+        # Build correlation matrix
+        corr_mat: dict[str, dict[str, float]] = {i: {} for i in tickers}
+        for i in tickers:
+            for j in tickers:
+                if i == j:
+                    corr_mat[i][j] = 1.0
+                else:
+                    key = (min(i, j), max(i, j))
+                    corr_mat[i][j] = correlations.get(key, 0.0)
+
+        vols = {i: volatilities.get(i, 0.0) for i in tickers}
+        ws = {i: weights.get(i, 0.0) for i in tickers}
+
+        # Total portfolio variance
+        total_var = 0.0
+        for i in tickers:
+            for j in tickers:
+                total_var += ws[i] * ws[j] * vols[i] * vols[j] * corr_mat[i][j]
+        total_vol = max(total_var, 0.0) ** 0.5
+
+        # Marginal contribution of each position to portfolio variance
+        # d(portfolio_var)/d(w_i) = 2 * sum_j(w_j * vol_i * vol_j * corr_ij)
+        marginal_contribs: dict[str, float] = {}
+        contribs: dict[str, float] = {}
+        for i in tickers:
+            mc = 2.0 * sum(ws[j] * vols[i] * vols[j] * corr_mat[i][j] for j in tickers)
+            marginal_contribs[i] = mc
+            # Actual contribution = w_i * marginal_contrib_i (Boud第二种分解)
+            contribs[i] = ws[i] * mc
+
+        # Normalize contributions
+        total_contrib = sum(contribs.values())
+        if total_contrib != 0:
+            normalized = {i: c / total_contrib for i, c in contribs.items()}
+        else:
+            normalized = {i: 0.0 for i in contribs}
+
+        return {
+            "total_volatility": round(total_vol, 6),
+            "contributions": {i: round(contribs[i], 6) for i in tickers},
+            "normalized_contributions": {i: round(normalized[i], 4) for i in tickers},
+            "marginal_contributions": {i: round(marginal_contribs[i], 6) for i in tickers},
+        }
+
+    # ── PF-05: Drawdown Attribution ─────────────────────────────────────────
+
+    def drawdown_attribution(
+        self,
+        equity_curve: list[float],
+        dates: list[str],
+        positions: dict[str, list[float]],
+        peak: float | None = None,
+    ) -> dict[str, Any]:
+        """Attribute portfolio drawdown periods to contributing positions (PF-05).
+
+        Identifies drawdown periods (high watermark to trough), then attributes
+        each period's loss to positions based on their weight and return during
+        the drawdown window.
+        """
+        if not equity_curve or len(equity_curve) < 2:
+            return {"max_drawdown": 0.0, "current_drawdown": 0.0, "attribution": {}}
+
+        # Compute drawdown series
+        highs = [equity_curve[0]]
+        for p in equity_curve[1:]:
+            highs.append(max(highs[-1], p))
+
+        drawdowns = [(highs[i] - equity_curve[i]) / highs[i] if highs[i] > 0 else 0.0 for i in range(len(equity_curve))]
+        max_dd = max(drawdowns) if drawdowns else 0.0
+        current_dd = drawdowns[-1] if drawdowns else 0.0
+
+        # Find the peak and trough of max drawdown
+        max_dd_idx = drawdowns.index(max_dd) if drawdowns else -1
+        peak_idx = highs.index(highs[max_dd_idx]) if max_dd_idx >= 0 else 0
+
+        # Attribution: compute contribution of each position during the drawdown window
+        attribution: dict[str, dict[str, float]] = {}
+        window_len = max(1, max_dd_idx - peak_idx)
+
+        for iid, pos_curve in positions.items():
+            if len(pos_curve) < len(equity_curve):
+                # Pad with last value if shorter
+                pos_curve = pos_curve + [pos_curve[-1]] * (len(equity_curve) - len(pos_curve))
+            if len(pos_curve) == 0:
+                continue
+
+            window_pos_returns = []
+            for t in range(peak_idx, max_dd_idx + 1):
+                if pos_curve[t] != 0:
+                    ret = (equity_curve[t] - pos_curve[t]) / pos_curve[t]
+                else:
+                    ret = 0.0
+                window_pos_returns.append(ret)
+
+            avg_ret = sum(window_pos_returns) / len(window_pos_returns) if window_pos_returns else 0.0
+            weight = 1.0 / max(len(positions), 1)  # Equal weight attribution
+            attribution[iid] = {
+                "avg_return_during_drawdown": round(avg_ret, 6),
+                "window_length": window_len,
+                "drawdown_contribution": round(avg_ret * weight, 6),
+            }
+
+        return {
+            "max_drawdown": round(max_dd, 6),
+            "current_drawdown": round(current_dd, 6),
+            "peak_date": dates[peak_idx] if dates and peak_idx < len(dates) else None,
+            "trough_date": dates[max_dd_idx] if dates and max_dd_idx < len(dates) else None,
+            "attribution": attribution,
+        }
+
+    # ── PF-05: Sector-Level Brinson Attribution ───────────────────────────────
+
+    def sector_brinson_attribution(
+        self,
+        portfolio_sector_weights: dict[str, float],
+        benchmark_sector_weights: dict[str, float],
+        portfolio_sector_returns: dict[str, float],
+        benchmark_sector_returns: dict[str, float],
+        sector_instruments: dict[str, list[str]],
+        portfolio_weights: dict[str, float],
+        benchmark_weights: dict[str, float],
+        portfolio_returns: dict[str, float],
+        benchmark_returns: dict[str, float],
+    ) -> dict[str, Any]:
+        """Perform sector-level Brinson attribution (PF-05).
+
+        True Brinson attribution operates at the sector level:
+        - Sector allocation effect: sum over sectors (Pw_s - Bw_s) * Br_s
+        - Sector selection effect: sum over sectors Bw_s * (PwR_s - Br_s)
+        - Interaction: sum over sectors (Pw_s - Bw_s) * (PwR_s - Br_s)
+        Then within each sector, also compute instrument-level allocation/selection.
+        """
+        sectors = set(portfolio_sector_weights.keys()) | set(benchmark_sector_weights.keys())
+
+        sector_alloc_effect = 0.0
+        sector_sel_effect = 0.0
+        sector_interact_effect = 0.0
+        sector_results: dict[str, dict[str, float]] = {}
+
+        for sector in sectors:
+            p_sw = portfolio_sector_weights.get(sector, 0.0)
+            b_sw = benchmark_sector_weights.get(sector, 0.0)
+            p_sr = portfolio_sector_returns.get(sector, 0.0)
+            b_sr = benchmark_sector_returns.get(sector, 0.0)
+
+            # Allocation: (Pw_s - Bw_s) * Br_s
+            alloc = (p_sw - b_sw) * b_sr
+            # Selection: Bw_s * (PwR_s - Br_s)
+            sel = b_sw * (p_sr - b_sr)
+            # Interaction: (Pw_s - Bw_s) * (PwR_s - Br_s)
+            interact = (p_sw - b_sw) * (p_sr - b_sr)
+
+            sector_alloc_effect += alloc
+            sector_sel_effect += sel
+            sector_interact_effect += interact
+
+            # Instrument-level breakdown within this sector
+            instruments = sector_instruments.get(sector, [])
+            instr_breakdown: dict[str, dict[str, float]] = {}
+            for iid in instruments:
+                p_w = portfolio_weights.get(iid, 0.0)
+                b_w = benchmark_weights.get(iid, 0.0)
+                p_r = portfolio_returns.get(iid, 0.0)
+                i_alloc = (p_w - b_w) * b_sr
+                i_sel = b_w * (p_r - b_sr)
+                i_interact = (p_w - b_w) * (p_r - b_sr)
+                instr_breakdown[iid] = {
+                    "allocation": round(i_alloc, 6),
+                    "selection": round(i_sel, 6),
+                    "interaction": round(i_interact, 6),
+                    "weight_pct": round(p_w * 100, 2),
+                }
+
+            sector_results[sector] = {
+                "allocation_effect": round(alloc, 6),
+                "selection_effect": round(sel, 6),
+                "interaction_effect": round(interact, 6),
+                "portfolio_weight": round(p_sw, 4),
+                "benchmark_weight": round(b_sw, 4),
+                "portfolio_return": round(p_sr, 4),
+                "benchmark_return": round(b_sr, 4),
+                "instruments": instr_breakdown,
+            }
+
+        return {
+            "total_allocation_effect": round(sector_alloc_effect, 6),
+            "total_selection_effect": round(sector_sel_effect, 6),
+            "total_interaction_effect": round(sector_interact_effect, 6),
+            "total_active_return": round(sector_alloc_effect + sector_sel_effect + sector_interact_effect, 6),
+            "sectors": sector_results,
+        }
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PF-06: Multi-Account Capital Allocation Interface

@@ -2487,8 +2487,12 @@ function renderBots() {
       const maxWeight = bot.params && bot.params.max_weight !== undefined ? bot.params.max_weight : "";
       const fastWindow = bot.params && bot.params.fast_window !== undefined ? bot.params.fast_window : "";
       const slowWindow = bot.params && bot.params.slow_window !== undefined ? bot.params.slow_window : "";
+      // BOT-03: PnL display
+      const pnlPct = bot.estimated_pnl_pct ?? metrics.price_change_pct ?? 0;
+      const pnlAbs = bot.estimated_pnl_abs ?? 0;
+      const pnlClass = metricClass(pnlPct);
       return `
-        <div class="bot-card">
+        <div class="bot-card" id="bot-card-${bot.bot_id}">
           <div class="bot-card-head">
             <div>
               <h3>${bot.bot_name}</h3>
@@ -2498,7 +2502,8 @@ function renderBots() {
           </div>
           <div class="bot-metrics-grid">
             <div class="bot-metric"><span>最新价</span><strong>${formatNumber(currentPrice)}</strong></div>
-            <div class="bot-metric"><span>价格变化</span><strong class="${metricClass(metrics.price_change_pct)}">${formatNumber(metrics.price_change_pct)}%</strong></div>
+            <div class="bot-metric"><span>价格变化</span><strong class="${pnlClass}">${formatNumber(pnlPct)}%</strong></div>
+            <div class="bot-metric"><span>估算盈亏</span><strong class="${pnlClass}">${pnlAbs >= 0 ? "+" : ""}${formatNumber(pnlAbs)}</strong></div>
             <div class="bot-metric"><span>目标仓位</span><strong class="${metricClass(metrics.signal_weight)}">${formatNumber(metrics.signal_weight)}</strong></div>
             <div class="bot-metric"><span>信号原因</span><strong>${metrics.signal_reason || "-"}</strong></div>
           </div>
@@ -5368,10 +5373,42 @@ function initSSE() {
         return;
       }
       if (data.type === "bot_state_changed" || data.type === "bot_list_changed") {
-        // Refresh bot console when any bot state changes
-        refreshBotConsole();
-        if (state.activeTab === "activity") {
-          loadActivity();
+        // BOT-03: Update bot in-place when full bot data is provided via SSE
+        if (data.bot && data.bot_id) {
+          const idx = state.bots.findIndex((b) => b.bot_id === data.bot_id);
+          if (idx >= 0) {
+            state.bots[idx] = { ...state.bots[idx], ...data.bot };
+          } else {
+            state.bots.push(data.bot);
+          }
+          // Re-render just the affected bot card for real-time PnL update
+          if (state.activeTab === "activity") {
+            renderBots();
+            loadActivity();
+          } else {
+            renderBots();
+          }
+        } else {
+          // Fallback: full refresh when no inline bot data
+          refreshBotConsole();
+        }
+        return;
+      }
+      if (data.type === "bot_params_updated") {
+        // Refresh just the affected bot's data from the server
+        if (data.bot_id) {
+          try {
+            const payload = await fetchJson(`/api/bots/${data.bot_id}/detail`);
+            if (payload.code === "OK" && payload.data) {
+              const idx = state.bots.findIndex((b) => b.bot_id === data.bot_id);
+              if (idx >= 0) {
+                state.bots[idx] = { ...state.bots[idx], ...payload.data };
+              }
+              renderBots();
+            }
+          } catch (_) {
+            refreshBotConsole();
+          }
         }
         return;
       }

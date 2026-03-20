@@ -963,6 +963,41 @@ class ControlPlaneAPI:
         except ValueError as exc:
             return self._error("BAD_REQUEST", str(exc))
 
+    def update_strategy_bot_params(self, bot_id: str, params: dict) -> dict:
+        """Update runtime parameters of a strategy bot (BOT-02).
+
+        Convenience endpoint wrapping interact(bot_id, "set_param", {"updates": params}).
+        """
+        try:
+            result = self.platform.bot_center.interact(bot_id, "set_param", {"updates": params})
+            return self._ok(result)
+        except KeyError:
+            return self._error("NOT_FOUND", "Bot not found.")
+        except ValueError as exc:
+            return self._error("BAD_REQUEST", str(exc))
+
+    def get_strategy_bot_details(self, bot_id: str) -> dict:
+        """Return detailed status for one bot including PnL estimates (BOT-03)."""
+        try:
+            bots = self.platform.bot_center.list_bots(refresh_runtime=True)
+            bot = next((b for b in bots if b["bot_id"] == bot_id), None)
+            if bot is None:
+                return self._error("NOT_FOUND", "Bot not found.")
+            # Compute estimated PnL from price change
+            baseline = bot.get("baseline_price") or 0
+            current = bot.get("last_price") or 0
+            if baseline > 0:
+                pnl_pct = (current - baseline) / baseline
+                estimated_pnl = pnl_pct * 100_000  # assumes 100k notional
+            else:
+                pnl_pct = 0.0
+                estimated_pnl = 0.0
+            bot["estimated_pnl_pct"] = round(pnl_pct * 100, 4)
+            bot["estimated_pnl_abs"] = round(estimated_pnl, 2)
+            return self._ok(bot)
+        except KeyError:
+            return self._error("NOT_FOUND", "Bot not found.")
+
     def list_strategy_notifications(self, limit: int = 20) -> dict:
         """Return recent strategy-bot notifications."""
 
