@@ -3148,6 +3148,17 @@ class ControlPlaneAPI:
         except Exception as exc:
             return self._error("INVALID_REQUEST", f"Failed to moderate post: {exc}")
 
+    def prometheus_metrics(self) -> dict:
+        """Export all metrics in Prometheus text format (P3: Prometheus integration).
+
+        Returns metrics as Prometheus text exposition format for scraping.
+        """
+        try:
+            metrics = self.platform.monitoring.prometheus_metrics()
+            return {"code": "OK", "data": {"metrics": metrics}}
+        except Exception as exc:
+            return self._error("INTERNAL_ERROR", f"Failed to export metrics: {exc}")
+
     def _serialize(self, value: Any) -> Any:
         if is_dataclass(value):
             return asdict(value)

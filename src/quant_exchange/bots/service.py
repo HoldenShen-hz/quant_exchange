@@ -45,6 +45,76 @@ class StrategyBotService:
 
         return [asdict(template) for template in self.templates.values()]
 
+    def quick_create_bot(
+        self,
+        *,
+        template_code: str,
+        instrument_id: str,
+        bot_name: str | None = None,
+        mode: str = "paper",
+        params: dict | None = None,
+        auto_start: bool = False,
+    ) -> dict:
+        """One-step bot creation with optional auto-start (BOT-01).
+
+        This is the primary quick-creation entry point that handles:
+        1. Template validation
+        2. Parameter normalization with defaults
+        3. Bot creation and persistence
+        4. Optional auto-start
+        """
+        # Validate template exists
+        if template_code not in self.templates:
+            raise ValueError(f"unknown_template:{template_code}")
+
+        # Create the bot
+        bot = self.create_bot(
+            template_code=template_code,
+            instrument_id=instrument_id,
+            bot_name=bot_name,
+            mode=mode,
+            params=params,
+        )
+
+        # Auto-start if requested
+        if auto_start:
+            bot = self.start_bot(bot["bot_id"])
+
+        return bot
+
+    def validate_template_params(self, template_code: str, params: dict) -> tuple[bool, list[str]]:
+        """Validate parameters against template schema (BOT-01).
+
+        Returns (valid, list_of_errors).
+        """
+        try:
+            template = self._template(template_code)
+        except KeyError:
+            return False, [f"unknown template: {template_code}"]
+
+        errors: list[str] = []
+        schema = {f["name"]: f for f in template.get("parameter_schema") or []}
+
+        for name, value in params.items():
+            if name not in schema:
+                errors.append(f"unknown parameter: {name}")
+                continue
+            field = schema[name]
+            ftype = field.get("type")
+            # Check bounds
+            if "min" in field and float(value) < field["min"]:
+                errors.append(f"{name} value {value} below minimum {field['min']}")
+            if "max" in field and float(value) > field["max"]:
+                errors.append(f"{name} value {value} above maximum {field['max']}")
+            # Check type
+            if ftype == "int" and not isinstance(value, int):
+                try:
+                    int(value)
+                except (TypeError, ValueError):
+                    errors.append(f"{name} must be an integer")
+
+        return len(errors) == 0, errors
+
     def create_bot(
         self,
         *,
