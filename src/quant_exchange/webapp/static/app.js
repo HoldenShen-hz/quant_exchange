@@ -958,7 +958,7 @@ function renderCryptoOverview(summary) {
     {
       title: "最活跃赛道",
       value: topCategory ? topCategory[0] : "-",
-      note: mostActive ? `${mostActive.asset_name} · 24h 成交额 ${formatNumber(mostActive.turnover_24h)}` : "暂无数据",
+      note: mostActive ? `${mostActive.asset_name} · 24h 成交额 ${formatLargeNumber(mostActive.turnover_24h)}` : "暂无数据",
     },
   ]
     .map(
@@ -1003,7 +1003,7 @@ function renderCryptoList() {
             <div class="watch-pricing">
               <span>${formatNumber(asset.last_price)}</span>
               <span class="${metricClass(asset.change_pct_24h)}">${formatNumber(asset.change_pct_24h)}%</span>
-              <span>24h 成交额 ${formatNumber(asset.turnover_24h)}</span>
+              <span>24h 成交额 ${formatLargeNumber(asset.turnover_24h)}</span>
               <span>30d 波动 ${formatNumber(asset.volatility_30d)}%</span>
             </div>
           </div>
@@ -1046,8 +1046,8 @@ function renderCryptoDetail(asset) {
         ${renderTags([asset.category, asset.base_currency, asset.quote_currency, asset.trading_mode])}
       </div>
       <div>
-        <p><strong>24h 成交额：</strong>${formatNumber(asset.turnover_24h)}</p>
-        <p><strong>24h 量：</strong>${formatNumber(asset.volume_24h)}</p>
+        <p><strong>24h 成交额：</strong>${formatLargeNumber(asset.turnover_24h)}</p>
+        <p><strong>24h 量：</strong>${formatLargeNumber(asset.volume_24h)}</p>
         <p><strong>30d 波动率：</strong>${formatNumber(asset.volatility_30d)}%</p>
         <p><strong>30d 趋势：</strong><span class="${metricClass(asset.trend_30d_pct)}">${formatNumber(asset.trend_30d_pct)}%</span></p>
         <p><strong>最小价格跳动：</strong>${formatNumber(asset.tick_size)}</p>
@@ -2192,7 +2192,7 @@ function renderFuturesOverview(data) {
   var active = data.most_active || [];
   if (gainers.length) cards.push({ title: "领涨合约", value: gainers[0].symbol, note: gainers[0].display_name + " · " + formatNumber(gainers[0].change_pct) + "%" });
   if (losers.length) cards.push({ title: "领跌合约", value: losers[0].symbol, note: losers[0].display_name + " · " + formatNumber(losers[0].change_pct) + "%" });
-  if (active.length) cards.push({ title: "最活跃", value: active[0].symbol, note: active[0].display_name + " · 成交额 " + formatNumber(active[0].turnover_24h) });
+  if (active.length) cards.push({ title: "最活跃", value: active[0].symbol, note: active[0].display_name + " · 成交额 " + formatLargeNumber(active[0].turnover_24h) });
   container.innerHTML = cards.map(function (c) {
     return '<div class="pulse-card"><h3>' + c.title + "</h3><strong>" + c.value + "</strong><p>" + c.note + "</p></div>";
   }).join("");
@@ -2730,10 +2730,10 @@ function renderPaperDashboard(payload) {
     return;
   }
   overview.innerHTML = `
-    <div class="paper-overview-card"><span>账户权益</span><strong>${formatNumber(snapshot.equity)}</strong></div>
-    <div class="paper-overview-card"><span>可用现金</span><strong>${formatNumber(snapshot.cash)}</strong></div>
-    <div class="paper-overview-card"><span>持仓市值</span><strong>${formatNumber(snapshot.positions_value)}</strong></div>
-    <div class="paper-overview-card"><span>总敞口</span><strong>${formatNumber(snapshot.gross_exposure)}</strong></div>
+    <div class="paper-overview-card"><span>账户权益</span><strong>${formatLargeNumber(snapshot.equity)}</strong></div>
+    <div class="paper-overview-card"><span>可用现金</span><strong>${formatLargeNumber(snapshot.cash)}</strong></div>
+    <div class="paper-overview-card"><span>持仓市值</span><strong>${formatLargeNumber(snapshot.positions_value)}</strong></div>
+    <div class="paper-overview-card"><span>总敞口</span><strong>${formatLargeNumber(snapshot.gross_exposure)}</strong></div>
     <div class="paper-overview-card"><span>杠杆</span><strong>${formatNumber(snapshot.leverage)}</strong></div>
     <div class="paper-overview-card"><span>回撤</span><strong class="${metricClass(snapshot.drawdown)}">${formatNumber(snapshot.drawdown * 100)}%</strong></div>
   `;
@@ -2754,8 +2754,8 @@ function renderPaperDashboard(payload) {
                 <p>${item.symbol} · ${formatNumber(item.quantity)} 股</p>
               </div>
               <div class="paper-item-side">
-                <strong>${formatNumber(item.market_value)}</strong>
-                <span class="${metricClass(item.unrealized_pnl)}">${formatNumber(item.unrealized_pnl)}</span>
+                <strong>${formatLargeNumber(item.market_value)}</strong>
+                <span class="${metricClass(item.unrealized_pnl)}">${formatLargeNumber(item.unrealized_pnl)}</span>
               </div>
             </div>
             <div class="paper-metric-row">
@@ -3285,11 +3285,11 @@ function computePulseCards() {
       {
         title: "最活跃",
         value: mostActive ? mostActive.symbol : "-",
-        note: mostActive ? `${mostActive.company_name} · ${formatNumber(mostActive.turnover)}` : "暂无数据",
+        note: mostActive ? `${mostActive.company_name} · ${formatLargeNumber(mostActive.turnover)}` : "暂无数据",
       },
       {
         title: "总成交额",
-        value: formatNumber(summary.total_turnover),
+        value: formatLargeNumber(summary.total_turnover),
         note: `行情时间 ${formatTime(state.marketSnapshot.as_of)}`,
       },
     ];
