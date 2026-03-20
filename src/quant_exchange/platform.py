@@ -30,6 +30,7 @@ from quant_exchange.enhanced import (
     ResearchMlService,
     UniverseService,
 )
+from quant_exchange.intelligence import LLMInterpretationService
 from quant_exchange.enhanced.smart_screener import SmartScreenerService
 from quant_exchange.enhanced.portfolio_allocators import (
     PortfolioAllocatorService,
@@ -74,6 +75,7 @@ class QuantTradingPlatform:
         # Redis caching layer — falls back to in-memory if Redis is unavailable
         self.cache: CacheService = RedisCacheService()
         self.intelligence = IntelligenceEngine()
+        self.llm_interp = LLMInterpretationService(self.intelligence)  # IN-07: LLM interpretation
         self._seed_intelligence_data()
         self.learning = LearningHubService()
         self.risk = RiskEngine()

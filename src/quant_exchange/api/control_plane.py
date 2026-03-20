@@ -1787,6 +1787,96 @@ class ControlPlaneAPI:
         except Exception as exc:
             return self._error("TEMPORARILY_UNAVAILABLE", f"Intelligence service unavailable: {exc}")
 
+    # ── IN-07: LLM Interpretation ────────────────────────────────────────────
+
+    def llm_summarize(self, instrument_id: str, window_days: int = 7) -> dict:
+        """Generate LLM summary of recent documents for an instrument (IN-07)."""
+        try:
+            from datetime import timedelta
+
+            summary = self.platform.llm_interp.summarize_documents(
+                instrument_id, window=timedelta(days=window_days)
+            )
+            return self._ok({
+                "instrument_id": summary.instrument_id,
+                "summary_text": summary.summary_text,
+                "key_themes": summary.key_themes,
+                "overall_tone": summary.overall_tone,
+                "confidence": round(summary.confidence, 3),
+                "document_count": summary.document_count,
+                "generated_at": summary.generated_at.isoformat(),
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"LLM interpretation unavailable: {exc}")
+
+    def llm_event_timeline(self, instrument_id: str, window_days: int = 30) -> dict:
+        """Build LLM-generated event timeline for an instrument (IN-07)."""
+        try:
+            from datetime import timedelta
+
+            timeline = self.platform.llm_interp.build_event_timeline(
+                instrument_id, window=timedelta(days=window_days)
+            )
+            return self._ok({
+                "instrument_id": timeline.instrument_id,
+                "narrative": timeline.narrative,
+                "clusters": [
+                    {
+                        "cluster_id": c.cluster_id,
+                        "headline": c.headline,
+                        "event_type": c.event_type,
+                        "sentiment_impact": round(c.sentiment_impact, 3),
+                        "time_range_start": c.time_range_start.isoformat(),
+                        "time_range_end": c.time_range_end.isoformat(),
+                    }
+                    for c in timeline.clusters
+                ],
+                "generated_at": timeline.generated_at.isoformat(),
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"LLM interpretation unavailable: {exc}")
+
+    def llm_explain_bias(self, instrument_id: str, window_days: int = 7) -> dict:
+        """Generate explainable bias explanation for an instrument (IN-07)."""
+        try:
+            from datetime import timedelta, timezone
+
+            bias = self.platform.intelligence.directional_bias(
+                instrument_id, as_of=datetime.now(timezone.utc), window=timedelta(days=window_days)
+            )
+            explanation = self.platform.llm_interp.explain_bias(bias, window=timedelta(days=window_days))
+            return self._ok({
+                "instrument_id": explanation.instrument_id,
+                "explanation_text": explanation.explanation_text,
+                "key_drivers": explanation.key_drivers,
+                "confidence_factors": explanation.confidence_factors,
+                "risk_cautions": explanation.risk_cautions,
+                "alternative_scenarios": explanation.alternative_scenarios,
+                "generated_at": explanation.generated_at.isoformat(),
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"LLM interpretation unavailable: {exc}")
+
+    def llm_market_commentary(self, instrument_id: str, window_days: int = 7) -> dict:
+        """Generate natural language market commentary for an instrument (IN-07)."""
+        try:
+            from datetime import timedelta
+
+            commentary = self.platform.llm_interp.generate_commentary(
+                instrument_id, window=timedelta(days=window_days)
+            )
+            return self._ok({
+                "instrument_id": commentary.instrument_id,
+                "headline": commentary.headline,
+                "body": commentary.body,
+                "sentiment_summary": commentary.sentiment_summary,
+                "key_level": commentary.key_level,
+                "catalyst_outlook": commentary.catalyst_outlook,
+                "generated_at": commentary.generated_at.isoformat(),
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"LLM interpretation unavailable: {exc}")
+
     def risk_dashboard(self) -> dict:
         """Return combined risk dashboard data including kill-switch status, alerts, and metrics."""
 

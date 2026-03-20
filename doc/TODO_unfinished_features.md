@@ -1,7 +1,7 @@
 # TODO: 未完成功能清单
 
 > 基于 doc/ 全部需求文档与代码库的逐项审计，截至 2026-03-20
-> 整体完成度约 95%（本次更新：性能压测+端到端测试完成）
+> 整体完成度约 96%（本次更新：IN-07 LLM解读完成）
 
 ---
 
@@ -48,7 +48,7 @@
 | SE-05 | 凭证加密/保险库 | YES | AES-256加密存储(PBKDF2密钥派生)，支持HMAC验证，防盗保护 |
 | SE-06 | 双因素认证/审批流 | YES | 真实TOTP实现(RFC 6238)，HMAC-SHA1，±1时间窗口容错，otpauth URI生成，支持QR码显示 |
 | SE-07 | 访问控制(细粒度) | YES | authorize_resource()实现，user×resource×action三层权限链(explicit_grant→role→deny)，支持grant/revoke/list方法，审计日志完整 |
-| IN-07 | NLP/LLM解读 | NO | 未实现 |
+| IN-07 | NLP/LLM解读 | YES | LLMInterpretationService实现，MockLLMClient + OpenAIClient接口，summarize_documents/event_timeline/explain_bias/generate_commentary，ControlPlaneAPI + Platform完整接入，10个单元/集成测试全通过 |
 
 ---
 
