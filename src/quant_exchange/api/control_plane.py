@@ -2639,6 +2639,357 @@ class ControlPlaneAPI:
         except Exception as e:
             return self._error("CALCULATION_ERROR", str(e))
 
+    # ── OPT-01~OPT-04: Options Trading Tools ────────────────────────────────
+
+    def opt_register_contract(
+        self,
+        instrument_id: str,
+        strike: float,
+        expiry: str,
+        option_type: str,  # "call" or "put"
+        style: str = "european",
+        multiplier: float = 100.0,
+    ) -> dict:
+        """Register an options contract (OPT-01)."""
+        try:
+            contract = self.platform.options.register_contract(
+                instrument_id=instrument_id,
+                strike=strike,
+                expiry=expiry,
+                option_type=option_type,
+                style=style,
+                multiplier=multiplier,
+            )
+            return self._ok({
+                "contract_id": contract.contract_id,
+                "instrument_id": contract.instrument_id,
+                "strike": contract.strike,
+                "expiry": contract.expiry,
+                "option_type": contract.option_type.value,
+                "style": contract.style.value,
+                "multiplier": contract.multiplier,
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Contract registration failed: {exc}")
+
+    def opt_price_contract(
+        self,
+        contract_id: str,
+        spot_price: float,
+        volatility: float | None = None,
+        risk_free_rate: float = 0.05,
+        dividend_yield: float = 0.0,
+        days_to_expiry: int | None = None,
+    ) -> dict:
+        """Price an options contract and compute Greeks (OPT-01, OPT-02)."""
+        try:
+            # If no explicit days_to_expiry, calculate from expiry
+            if days_to_expiry is None:
+                from datetime import datetime
+                expiry_dt = datetime.fromisoformat(self.platform.options.get_contract(contract_id).expiry)
+                days_to_expiry = max(1, (expiry_dt - datetime.now()).days)
+
+            result = self.platform.options.price_contract(
+                contract_id=contract_id,
+                spot_price=spot_price,
+                volatility=volatility,
+                risk_free_rate=risk_free_rate,
+                dividend_yield=dividend_yield,
+                days_to_expiry=days_to_expiry,
+            )
+            return self._ok({
+                "contract_id": contract_id,
+                "price": result.price,
+                "delta": result.delta,
+                "gamma": result.gamma,
+                "theta": result.theta,
+                "vega": result.vega,
+                "rho": result.rho,
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Pricing failed: {exc}")
+
+    def opt_compute_implied_vol(
+        self,
+        contract_id: str,
+        spot_price: float,
+        option_price: float,
+        risk_free_rate: float = 0.05,
+        dividend_yield: float = 0.0,
+    ) -> dict:
+        """Compute implied volatility from market price (OPT-03)."""
+        try:
+            iv = self.platform.options.calculate_implied_vol(
+                contract_id=contract_id,
+                spot_price=spot_price,
+                option_price=option_price,
+                risk_free_rate=risk_free_rate,
+                dividend_yield=dividend_yield,
+            )
+            return self._ok({
+                "contract_id": contract_id,
+                "implied_volatility": iv,
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"IV computation failed: {exc}")
+
+    def opt_build_strategy(
+        self,
+        name: str,
+        legs: list[dict],
+    ) -> dict:
+        """Build a multi-leg option strategy (OPT-04)."""
+        try:
+            from quant_exchange.enhanced.options import StrategyLegRole
+
+            parsed_legs = []
+            for i, leg in enumerate(legs):
+                parsed_legs.append({
+                    "contract_id": leg["contract_id"],
+                    "position": leg.get("position", 1),
+                    "role": StrategyLegRole(leg.get("role", "long")),
+                })
+
+            strategy = self.platform.options.create_strategy(name=name, legs=parsed_legs)
+            return self._ok({
+                "strategy_id": strategy.strategy_id,
+                "name": strategy.name,
+                "legs": [
+                    {
+                        "contract_id": leg.contract_id,
+                        "position": leg.position,
+                        "role": leg.role.value,
+                    }
+                    for leg in strategy.legs
+                ],
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Strategy building failed: {exc}")
+
+    def opt_get_strategy_greeks(self, strategy_id: str, spot_price: float, volatility: float, risk_free_rate: float = 0.05) -> dict:
+        """Compute combined Greeks for an option strategy (OPT-02, OPT-04)."""
+        try:
+            greeks = self.platform.options.compute_strategy_greeks(
+                strategy_id=strategy_id,
+                spot_price=spot_price,
+                volatility=volatility,
+                risk_free_rate=risk_free_rate,
+            )
+            return self._ok({
+                "strategy_id": strategy_id,
+                "delta": greeks.delta,
+                "gamma": greeks.gamma,
+                "theta": greeks.theta,
+                "vega": greeks.vega,
+                "rho": greeks.rho,
+                "price": greeks.price,
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Strategy Greeks failed: {exc}")
+
+    def opt_add_vol_surface_point(
+        self,
+        underlying: str,
+        expiry: str,
+        strike: float,
+        volatility: float,
+    ) -> dict:
+        """Add a point to the volatility surface (OPT-03)."""
+        try:
+            self.platform.options.add_vol_surface_point(
+                underlying=underlying,
+                expiry=expiry,
+                strike=strike,
+                volatility=volatility,
+            )
+            return self._ok({
+                "underlying": underlying,
+                "expiry": expiry,
+                "strike": strike,
+                "volatility": volatility,
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Vol surface update failed: {exc}")
+
+    def opt_get_vol_surface(self, underlying: str) -> dict:
+        """Get the volatility surface for an underlying (OPT-03)."""
+        try:
+            surface = self.platform.options.get_vol_surface(underlying)
+            if not surface:
+                return self._error("NOT_FOUND", f"No vol surface for {underlying}")
+            return self._ok({
+                "underlying": surface.underlying,
+                "points": [
+                    {
+                        "expiry": p.expiry,
+                        "strike": p.strike,
+                        "volatility": p.volatility,
+                    }
+                    for p in surface.points
+                ],
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Vol surface retrieval failed: {exc}")
+
+    # ── FX-01~FX-04: Forex and Commodities ─────────────────────────────────
+
+    def fx_list_pairs(self) -> dict:
+        """List all currency pairs (FX-01)."""
+        try:
+            pairs = self.platform.forex.list_pairs()
+            return self._ok({
+                "pairs": [
+                    {
+                        "instrument_id": p.instrument_id,
+                        "base_currency": p.base_currency,
+                        "quote_currency": p.quote_currency,
+                        "pip_size": p.pip_size,
+                    }
+                    for p in pairs
+                ]
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Failed to list pairs: {exc}")
+
+    def fx_list_commodities(self) -> dict:
+        """List all commodities (FX-02)."""
+        try:
+            commodities = self.platform.forex.list_commodities()
+            return self._ok({
+                "commodities": [
+                    {
+                        "instrument_id": c.instrument_id,
+                        "name": c.name,
+                        "unit": c.unit,
+                        "contract_size": c.contract_size,
+                    }
+                    for c in commodities
+                ]
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Failed to list commodities: {exc}")
+
+    def fx_get_quote(self, instrument_id: str) -> dict:
+        """Get quote for a forex or commodity instrument (FX-01, FX-02)."""
+        try:
+            inst_id = instrument_id.upper()
+            # Simulate quote if not available
+            quote = self.platform.forex.get_quote(inst_id)
+            if not quote:
+                quote = self.platform.forex.simulate_quote(inst_id)
+            return self._ok({
+                "instrument_id": quote.instrument_id,
+                "bid": quote.bid,
+                "ask": quote.ask,
+                "mid": quote.mid,
+                "spread_pips": quote.spread_pips,
+                "change_pct": quote.change_pct,
+                "timestamp": quote.timestamp.isoformat(),
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Failed to get quote: {exc}")
+
+    def fx_get_currency_strength(self) -> dict:
+        """Get currency strength ranking (FX-03)."""
+        try:
+            strengths = self.platform.forex.compute_currency_strength()
+            return self._ok({
+                "currencies": [
+                    {
+                        "currency": s.currency,
+                        "strength_value": round(s.strength_value, 2),
+                        "rank": s.rank,
+                        "change_1d": round(s.change_1d, 4),
+                        "contributing_pairs": s.contributing_pairs,
+                    }
+                    for s in strengths
+                ]
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Failed to compute currency strength: {exc}")
+
+    def fx_get_economic_calendar(self, hours: int = 24, currency: str | None = None) -> dict:
+        """Get upcoming economic events (FX-03)."""
+        try:
+            events = self.platform.forex.get_upcoming_events(hours=hours, currency=currency)
+            return self._ok({
+                "events": [
+                    {
+                        "event_id": e.event_id,
+                        "country": e.country,
+                        "currency": e.currency,
+                        "event_name": e.event_name,
+                        "impact": e.impact.value,
+                        "release_time": e.release_time.isoformat(),
+                        "previous_value": e.previous_value,
+                        "forecast_value": e.forecast_value,
+                        "actual_value": e.actual_value,
+                    }
+                    for e in events
+                ]
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Failed to get calendar: {exc}")
+
+    def fx_add_economic_event(
+        self,
+        country: str,
+        currency: str,
+        event_name: str,
+        impact: str,
+        release_time: str,
+        previous_value: str,
+        forecast_value: str,
+        actual_value: str = "",
+    ) -> dict:
+        """Add an economic calendar event (FX-03)."""
+        try:
+            from datetime import datetime
+            from quant_exchange.forex import EconomicImpact
+
+            release_dt = datetime.fromisoformat(release_time)
+            event = self.platform.forex.add_economic_event(
+                country=country,
+                currency=currency,
+                event_name=event_name,
+                impact=EconomicImpact(impact),
+                release_time=release_dt,
+                previous_value=previous_value,
+                forecast_value=forecast_value,
+                actual_value=actual_value,
+            )
+            return self._ok({
+                "event_id": event.event_id,
+                "event_name": event.event_name,
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Failed to add event: {exc}")
+
+    def fx_get_correlation_matrix(self, instruments: list[str]) -> dict:
+        """Get correlation matrix for instruments (FX-03)."""
+        try:
+            matrix = self.platform.forex.get_correlation_matrix(instruments)
+            return self._ok({"matrix": matrix})
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Failed to compute correlations: {exc}")
+
+    def fx_cross_asset_risk(self, positions: dict[str, float]) -> dict:
+        """Compute cross-asset risk metrics (FX-04)."""
+        try:
+            risk = self.platform.forex.compute_cross_asset_risk(positions)
+            return self._ok({
+                "correlation_matrix": risk.correlation_matrix,
+                "strongest_correlation": {
+                    "asset1": risk.strongest_correlation[0],
+                    "asset2": risk.strongest_correlation[1],
+                    "correlation": risk.strongest_correlation[2],
+                },
+                "risk_concentration": risk.risk_concentration,
+                "currency_exposure": risk.currency_exposure,
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Failed to compute risk: {exc}")
+
     def _serialize(self, value: Any) -> Any:
         if is_dataclass(value):
             return asdict(value)

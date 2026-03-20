@@ -29,11 +29,13 @@ from quant_exchange.enhanced import (
     FeatureStoreService,
     LedgerService,
     MultiAccountService,
+    OptionsService,
     ReplayService,
     ResearchMlService,
     UniverseService,
 )
 from quant_exchange.intelligence import LLMInterpretationService
+from quant_exchange.forex import ForexService
 from quant_exchange.enhanced.smart_screener import SmartScreenerService
 from quant_exchange.enhanced.portfolio_allocators import (
     PortfolioAllocatorService,
@@ -131,6 +133,8 @@ class QuantTradingPlatform:
         self.attribution = AttributionAnalyzer()
         self.multi_account = MultiAccountAllocator(self.persistence)
         self.multi_account_service = MultiAccountService(self.persistence)  # ACCT-01~ACCT-04: Multi-account management
+        self.options = OptionsService(self.persistence)  # OPT-01~OPT-04: Options trading tools
+        self.forex = ForexService(self.persistence)  # FX-01~FX-04: Forex and commodities
         self._register_default_adapters()
         self.crypto = CryptoWorkbenchService(self.adapters, self.market_data, cache_service=self.cache)
         self.futures = FuturesWorkbenchService(self.adapters, self.market_data)
