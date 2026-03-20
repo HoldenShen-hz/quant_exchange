@@ -400,6 +400,13 @@ class ControlPlaneAPI:
                 limit_price=limit_price,
                 contract_multiplier=contract_multiplier,
             )
+            self._audit(
+                actor="api",
+                action=Action.SUBMIT_ORDER,
+                resource=f"futures:{account_code}:{instrument_id}",
+                success=True,
+                details={"order_id": order.order_id, "instrument_id": instrument_id, "direction": direction, "quantity": quantity},
+            )
             return self._ok({"order": {
                 "order_id": order.order_id,
                 "instrument_id": order.instrument_id,
@@ -410,6 +417,13 @@ class ControlPlaneAPI:
                 "status": order.status,
             }})
         except Exception as exc:
+            self._audit(
+                actor="api",
+                action=Action.SUBMIT_ORDER,
+                resource=f"futures:{account_code}:{instrument_id}",
+                success=False,
+                details={"instrument_id": instrument_id, "reason": str(exc)},
+            )
             return self._error("TEMPORARILY_UNAVAILABLE", f"Futures order failed: {exc}")
 
     def get_futures_positions(self, account_code: str = "futures_main") -> dict:
@@ -875,9 +889,30 @@ class ControlPlaneAPI:
                 order_type=order_type,
                 limit_price=limit_price,
             )
+            self._audit(
+                actor="api",
+                action=Action.SUBMIT_ORDER,
+                resource=f"paper:{account_code}:{instrument_id}",
+                success=True,
+                details={"order_id": payload.get("order_id"), "instrument_id": instrument_id, "side": side, "quantity": quantity},
+            )
         except KeyError:
+            self._audit(
+                actor="api",
+                action=Action.SUBMIT_ORDER,
+                resource=f"paper:{account_code}:{instrument_id}",
+                success=False,
+                details={"instrument_id": instrument_id, "reason": "instrument_not_found"},
+            )
             return self._error("NOT_FOUND", "Instrument not found.")
         except ValueError as exc:
+            self._audit(
+                actor="api",
+                action=Action.SUBMIT_ORDER,
+                resource=f"paper:{account_code}:{instrument_id}",
+                success=False,
+                details={"instrument_id": instrument_id, "reason": str(exc)},
+            )
             return self._error("BAD_REQUEST", str(exc))
         return self._ok(payload)
 
@@ -885,8 +920,23 @@ class ControlPlaneAPI:
         """Cancel one simulated order."""
 
         try:
-            return self._ok(self.platform.paper_trading.cancel_order(order_id, account_code=account_code))
+            result = self.platform.paper_trading.cancel_order(order_id, account_code=account_code)
+            self._audit(
+                actor="api",
+                action=Action.CANCEL_ORDER,
+                resource=f"paper:{account_code}:{order_id}",
+                success=True,
+                details={"order_id": order_id},
+            )
+            return self._ok(result)
         except KeyError:
+            self._audit(
+                actor="api",
+                action=Action.CANCEL_ORDER,
+                resource=f"paper:{account_code}:{order_id}",
+                success=False,
+                details={"order_id": order_id, "reason": "order_not_found"},
+            )
             return self._error("NOT_FOUND", "Order not found.")
 
     def reset_paper_account(self, account_code: str = "paper_stock_main") -> dict:
@@ -923,44 +973,78 @@ class ControlPlaneAPI:
                 mode=mode,
                 params=params,
             )
+            self._audit(
+                actor="api",
+                action="create_strategy_bot",
+                resource=f"bot:{payload['bot_id']}",
+                success=True,
+                details={"template_code": template_code, "instrument_id": instrument_id, "mode": mode},
+            )
+            return self._ok(payload)
         except KeyError as exc:
+            self._audit(
+                actor="api",
+                action="create_strategy_bot",
+                resource=f"bot:unknown",
+                success=False,
+                details={"template_code": template_code, "instrument_id": instrument_id, "reason": str(exc)},
+            )
             return self._error("NOT_FOUND", f"Unknown template or instrument: {exc.args[0]}")
         except ValueError as exc:
+            self._audit(
+                actor="api",
+                action="create_strategy_bot",
+                resource=f"bot:unknown",
+                success=False,
+                details={"template_code": template_code, "instrument_id": instrument_id, "reason": str(exc)},
+            )
             return self._error("BAD_REQUEST", str(exc))
-        return self._ok(payload)
 
     def start_strategy_bot(self, bot_id: str) -> dict:
         """Start one strategy bot."""
 
         try:
-            return self._ok(self.platform.bot_center.start_bot(bot_id))
+            payload = self.platform.bot_center.start_bot(bot_id)
+            self._audit(actor="api", action="start_strategy_bot", resource=f"bot:{bot_id}", success=True, details={})
+            return self._ok(payload)
         except KeyError:
+            self._audit(actor="api", action="start_strategy_bot", resource=f"bot:{bot_id}", success=False, details={"reason": "bot_not_found"})
             return self._error("NOT_FOUND", "Bot not found.")
 
     def pause_strategy_bot(self, bot_id: str) -> dict:
         """Pause one strategy bot."""
 
         try:
-            return self._ok(self.platform.bot_center.pause_bot(bot_id))
+            payload = self.platform.bot_center.pause_bot(bot_id)
+            self._audit(actor="api", action="pause_strategy_bot", resource=f"bot:{bot_id}", success=True, details={})
+            return self._ok(payload)
         except KeyError:
+            self._audit(actor="api", action="pause_strategy_bot", resource=f"bot:{bot_id}", success=False, details={"reason": "bot_not_found"})
             return self._error("NOT_FOUND", "Bot not found.")
 
     def stop_strategy_bot(self, bot_id: str) -> dict:
         """Stop one strategy bot."""
 
         try:
-            return self._ok(self.platform.bot_center.stop_bot(bot_id))
+            payload = self.platform.bot_center.stop_bot(bot_id)
+            self._audit(actor="api", action="stop_strategy_bot", resource=f"bot:{bot_id}", success=True, details={})
+            return self._ok(payload)
         except KeyError:
+            self._audit(actor="api", action="stop_strategy_bot", resource=f"bot:{bot_id}", success=False, details={"reason": "bot_not_found"})
             return self._error("NOT_FOUND", "Bot not found.")
 
     def interact_strategy_bot(self, bot_id: str, command: str, payload: dict | None = None) -> dict:
         """Execute one interactive command against a strategy bot."""
 
         try:
-            return self._ok(self.platform.bot_center.interact(bot_id, command, payload))
+            result = self.platform.bot_center.interact(bot_id, command, payload)
+            self._audit(actor="api", action=f"bot_interact_{command}", resource=f"bot:{bot_id}", success=True, details={"command": command})
+            return self._ok(result)
         except KeyError:
+            self._audit(actor="api", action=f"bot_interact_{command}", resource=f"bot:{bot_id}", success=False, details={"command": command, "reason": "bot_not_found"})
             return self._error("NOT_FOUND", "Bot not found.")
         except ValueError as exc:
+            self._audit(actor="api", action=f"bot_interact_{command}", resource=f"bot:{bot_id}", success=False, details={"command": command, "reason": str(exc)})
             return self._error("BAD_REQUEST", str(exc))
 
     def update_strategy_bot_params(self, bot_id: str, params: dict) -> dict:
@@ -970,10 +1054,13 @@ class ControlPlaneAPI:
         """
         try:
             result = self.platform.bot_center.interact(bot_id, "set_param", {"updates": params})
+            self._audit(actor="api", action="update_strategy_bot_params", resource=f"bot:{bot_id}", success=True, details={"params": list(params.keys())})
             return self._ok(result)
         except KeyError:
+            self._audit(actor="api", action="update_strategy_bot_params", resource=f"bot:{bot_id}", success=False, details={"reason": "bot_not_found"})
             return self._error("NOT_FOUND", "Bot not found.")
         except ValueError as exc:
+            self._audit(actor="api", action="update_strategy_bot_params", resource=f"bot:{bot_id}", success=False, details={"reason": str(exc)})
             return self._error("BAD_REQUEST", str(exc))
 
     def get_strategy_bot_details(self, bot_id: str) -> dict:
@@ -1035,8 +1122,22 @@ class ControlPlaneAPI:
                 auto_rebalance=auto_rebalance,
                 rebalance_threshold=rebalance_threshold,
             )
+            self._audit(
+                actor="api",
+                action="create_composite_bot",
+                resource=f"composite:{payload['bot_id']}",
+                success=True,
+                details={"instrument_id": instrument_id, "sub_bot_count": len(sub_bot_configs or [])},
+            )
             return self._ok(payload)
         except (KeyError, ValueError) as exc:
+            self._audit(
+                actor="api",
+                action="create_composite_bot",
+                resource="composite:unknown",
+                success=False,
+                details={"instrument_id": instrument_id, "reason": str(exc)},
+            )
             return self._error("BAD_REQUEST", str(exc))
 
     def list_composite_bots(self) -> dict:
@@ -1058,24 +1159,45 @@ class ControlPlaneAPI:
     ) -> dict:
         """Rebalance sub-bot weights in a composite (BOT-06)."""
         try:
-            return self._ok(self.platform.bot_center.rebalance_composite_bot(
+            result = self.platform.bot_center.rebalance_composite_bot(
                 composite_id, new_weights=new_weights, mode=mode
-            ))
+            )
+            self._audit(
+                actor="api",
+                action="rebalance_composite_bot",
+                resource=f"composite:{composite_id}",
+                success=True,
+                details={"mode": mode},
+            )
+            return self._ok(result)
         except (KeyError, ValueError) as exc:
+            self._audit(
+                actor="api",
+                action="rebalance_composite_bot",
+                resource=f"composite:{composite_id}",
+                success=False,
+                details={"reason": str(exc)},
+            )
             return self._error("BAD_REQUEST", str(exc))
 
     def start_composite_bot(self, composite_id: str) -> dict:
         """Start all sub-bots within a composite (BOT-06)."""
         try:
-            return self._ok(self.platform.bot_center.start_composite_bot(composite_id))
+            payload = self.platform.bot_center.start_composite_bot(composite_id)
+            self._audit(actor="api", action="start_composite_bot", resource=f"composite:{composite_id}", success=True, details={})
+            return self._ok(payload)
         except (KeyError, ValueError) as exc:
+            self._audit(actor="api", action="start_composite_bot", resource=f"composite:{composite_id}", success=False, details={"reason": str(exc)})
             return self._error("NOT_FOUND", str(exc))
 
     def stop_composite_bot(self, composite_id: str) -> dict:
         """Stop all sub-bots within a composite (BOT-06)."""
         try:
-            return self._ok(self.platform.bot_center.stop_composite_bot(composite_id))
+            payload = self.platform.bot_center.stop_composite_bot(composite_id)
+            self._audit(actor="api", action="stop_composite_bot", resource=f"composite:{composite_id}", success=True, details={})
+            return self._ok(payload)
         except (KeyError, ValueError) as exc:
+            self._audit(actor="api", action="stop_composite_bot", resource=f"composite:{composite_id}", success=False, details={"reason": str(exc)})
             return self._error("NOT_FOUND", str(exc))
 
     def sync_klines(self, exchange_code: str, instrument_id: str, interval: str) -> dict:
@@ -1127,6 +1249,13 @@ class ControlPlaneAPI:
                 "status": "ACTIVE",
             },
         )
+        self._audit(
+            actor="api",
+            action="create_account",
+            resource=f"account:{account_code}",
+            success=True,
+            details={"account_code": account_code, "market_type": market_type, "environment": environment},
+        )
         return self._ok(payload)
 
     def list_accounts(self) -> dict:
@@ -1149,6 +1278,13 @@ class ControlPlaneAPI:
             strategy_code,
             payload,
             extra_columns={"strategy_name": strategy_name, "category": category, "status": "ACTIVE"},
+        )
+        self._audit(
+            actor="api",
+            action="create_strategy",
+            resource=f"strategy:{strategy_code}",
+            success=True,
+            details={"strategy_code": strategy_code, "category": category},
         )
         return self._ok(payload)
 
@@ -1206,6 +1342,13 @@ class ControlPlaneAPI:
             source_code,
             payload,
             extra_columns={"source_name": source_name, "source_type": source_type, "status": "ACTIVE"},
+        )
+        self._audit(
+            actor="api",
+            action="create_intel_source",
+            resource=f"intel_source:{source_code}",
+            success=True,
+            details={"source_code": source_code, "source_type": source_type},
         )
         return self._ok(payload)
 
@@ -1269,6 +1412,13 @@ class ControlPlaneAPI:
             rule_code,
             payload,
             extra_columns={"rule_type": rule_type, "action_type": action_type},
+        )
+        self._audit(
+            actor="api",
+            action=Action.MODIFY_RISK_RULES,
+            resource=f"risk_rule:{rule_code}",
+            success=True,
+            details={"rule_code": rule_code, "rule_type": rule_type, "action_type": action_type},
         )
         return self._ok(payload)
 
