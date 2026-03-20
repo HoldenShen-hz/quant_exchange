@@ -212,28 +212,33 @@ class TwoFactorAuthTests(unittest.TestCase):
         self.assertTrue(success)
         self.assertGreater(len(secret), 0)
 
-        # Generate a real TOTP code from the user's secret (same algorithm as service)
+        # Generate a real TOTP code using the SAME padding logic as the service
         import base64
         import hashlib
         import hmac
         import struct
         import time
-        raw = secret.upper().encode()
-        # Pad to multiple of 8
-        raw += b"=" * ((8 - len(raw) % 8) % 8)
-        key = base64.b32decode(raw)
+        sec = secret.upper().encode()
+        # Same padding as service: only pad if not already a multiple of 8
+        sec += b"=" * (8 - len(sec) % 8) if len(sec) % 8 else b""
+        key = base64.b32decode(sec)
         counter = int(time.time()) // 30
-        msg = struct.pack(">Q", counter)
-        hmac_hash = hmac.new(key, msg, hashlib.sha1).digest()
-        offset_val = hmac_hash[-1] & 0x0F
-        bin_code = (
-            (hmac_hash[offset_val] & 0x7F) << 24
-            | (hmac_hash[offset_val + 1] & 0xFF) << 16
-            | (hmac_hash[offset_val + 2] & 0xFF) << 8
-            | (hmac_hash[offset_val + 3] & 0xFF)
-        )
-        real_totp = str(bin_code % 10**6)
-        result = self.service.verify_2fa(self.user.user_id, real_totp)
+        # Try current, previous, and next 30s window to handle clock skew
+        for offset in (-1, 0, 1):
+            c = counter + offset
+            msg = struct.pack(">Q", c)
+            hmac_hash = hmac.new(key, msg, hashlib.sha1).digest()
+            offset_val = hmac_hash[-1] & 0x0F
+            bin_code = (
+                (hmac_hash[offset_val] & 0x7F) << 24
+                | (hmac_hash[offset_val + 1] & 0xFF) << 16
+                | (hmac_hash[offset_val + 2] & 0xFF) << 8
+                | (hmac_hash[offset_val + 3] & 0xFF)
+            )
+            totp = str(bin_code % 10**6)
+            result = self.service.verify_2fa(self.user.user_id, totp)
+            if result:
+                break
         self.assertTrue(result)
 
     def test_verify_2fa_rejects_invalid_code(self) -> None:

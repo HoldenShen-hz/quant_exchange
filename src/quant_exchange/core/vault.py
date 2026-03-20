@@ -50,6 +50,7 @@ class CredentialVault:
         self._vault_path = vault_path or self.DEFAULT_VAULT_PATH
         self._fernet: Fernet | None = None
         self._hmac_key: bytes | None = None
+        self._pending_salt: bytes | None = None  # cached salt for new vaults
         if self._master_key:
             self._init_encryption()
 
@@ -58,6 +59,8 @@ class CredentialVault:
         if _HAS_CRYPTGRAPHY:
             # Derive a 32-byte key using PBKDF2-HMAC-SHA256
             salt = self._get_or_create_salt()
+            # Cache it so _save_vault uses the same salt for a new vault
+            self._pending_salt = salt
             kdf = PBKDF2HMAC(
                 algorithm=hashes.SHA256(),
                 length=32,
@@ -72,6 +75,9 @@ class CredentialVault:
 
     def _get_or_create_salt(self) -> bytes:
         """Get the vault salt from the vault file, or create a new one."""
+        # Return cached salt if we've already created one for this new vault
+        if not self._vault_path.exists() and self._pending_salt:
+            return self._pending_salt
         if self._vault_path.exists():
             try:
                 data = json.loads(self._vault_path.read_text("utf-8"))
@@ -97,7 +103,7 @@ class CredentialVault:
         if "_salt" in data:
             salt_b64 = data["_salt"]
             if _HAS_CRYPTGRAPHY and self._fernet:
-                # Re-init with correct salt
+                # Re-derive the cipher using the stored salt.
                 salt = base64.b64decode(salt_b64)
                 kdf = PBKDF2HMAC(
                     algorithm=hashes.SHA256(),
@@ -107,6 +113,8 @@ class CredentialVault:
                 )
                 key = base64.urlsafe_b64encode(kdf.derive(self._master_key.encode("utf-8")))
                 self._fernet = Fernet(key)
+                # Keep pending salt in sync so store() after load() is consistent
+                self._pending_salt = salt
         # Verify the key using the stored verification token
         if "_verify" in data and self._hmac_key:
             stored_verify = base64.b64decode(data["_verify"])
