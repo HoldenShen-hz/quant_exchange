@@ -446,6 +446,9 @@ class ControlPlaneAPI:
     ) -> dict:
         """Evaluate one submitted learning quiz answer set and persist user-specific progress."""
 
+        # Ensure answers is a dict, not None or other type
+        if not isinstance(answers, dict):
+            answers = {}
         result = self.platform.learning.evaluate_quiz(answers)
         progress = self.platform.web_workspace.record_learning_attempt(
             principal_id,

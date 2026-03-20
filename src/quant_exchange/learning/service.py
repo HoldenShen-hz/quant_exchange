@@ -54,7 +54,8 @@ class LearningHubService:
     def evaluate_quiz(self, answers: dict[str, str] | None) -> dict[str, Any]:
         """Score one submitted quiz answer set and return structured feedback."""
 
-        answers = answers or {}
+        if not isinstance(answers, dict):
+            answers = {}
         results: list[dict[str, Any]] = []
         weak_lessons: set[str] = set()
         correct_count = 0
