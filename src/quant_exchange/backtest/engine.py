@@ -7,6 +7,8 @@ from typing import Any
 from quant_exchange.core.models import (
     BacktestResult,
     CostBreakdown,
+    Direction,
+    DirectionalBias,
     Kline,
     OrderRequest,
     OrderSide,
@@ -72,6 +74,26 @@ class BacktestEngine:
         risk_rejections: list[RiskDecision] = []
         strategy_events: list[dict] = []
 
+        def _neutral_bias(as_of: datetime) -> DirectionalBias:
+            return DirectionalBias(
+                instrument_id=instrument.instrument_id,
+                as_of=as_of,
+                window=self.bias_window,
+                score=0.0,
+                direction=Direction.FLAT,
+                confidence=0.0,
+                supporting_documents=0,
+            )
+
+        def _get_bias(as_of: datetime) -> DirectionalBias:
+            if intelligence_engine is None:
+                return _neutral_bias(as_of)
+            return intelligence_engine.directional_bias(
+                instrument.instrument_id,
+                as_of=as_of,
+                window=self.bias_window,
+            )
+
         # ── on_init: one-time initialization before first bar ──────────────────
         if klines:
             init_bar = klines[0]
@@ -85,22 +107,14 @@ class BacktestEngine:
                 position=portfolio.get_position(instrument.instrument_id),
                 cash=init_snapshot.cash,
                 equity=init_snapshot.equity,
-                latest_bias=intelligence_engine.directional_bias(
-                    instrument.instrument_id,
-                    as_of=init_bar.close_time,
-                    window=self.bias_window,
-                ),
+                latest_bias=_get_bias(init_bar.close_time),
             )
             strategy.on_init(init_context)
 
         for idx, bar in enumerate(klines):
             history = tuple(klines[: idx + 1])
             snapshot = portfolio.mark_to_market({instrument.instrument_id: bar.close}, timestamp=bar.close_time)
-            bias = intelligence_engine.directional_bias(
-                instrument.instrument_id,
-                as_of=bar.close_time,
-                window=self.bias_window,
-            )
+            bias = _get_bias(bar.close_time)
             bias_history.append(bias)
             context = StrategyContext(
                 instrument=instrument,
@@ -132,7 +146,7 @@ class BacktestEngine:
                     price=bar.close,
                     current_position_qty=current_qty,
                     snapshot=snapshot,
-                )
+                ) if risk_engine else RiskDecision(approved=True, reasons=())
                 if decision.approved:
                     order = oms.submit_order(request)
                     matched_fills = self.execution.execute_on_bar(order, bar)
@@ -153,7 +167,7 @@ class BacktestEngine:
                         "reasons": decision.reasons,
                     })
             snapshot = portfolio.mark_to_market({instrument.instrument_id: bar.close}, timestamp=bar.close_time)
-            monitoring.check_drawdown(snapshot, risk_engine.limits.max_drawdown)
+            monitoring.check_drawdown(snapshot, risk_engine.limits.max_drawdown if risk_engine else 1.0)
             equity_curve.append((bar.close_time, snapshot.equity))
         metrics = self._metrics(equity_curve, fills)
         return BacktestResult(

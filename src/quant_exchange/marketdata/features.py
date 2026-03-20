@@ -15,7 +15,7 @@ from typing import Any
 from quant_exchange.core.utils import mean, stddev
 from quant_exchange.strategy.factors import (
     atr, amihud_illiquidity, bollinger_bands, bollinger_percent_b,
-    cci, ema, macd, momentum, obv, realized_volatility, rsi,
+    cci, ema, ewma_volatility, macd, momentum, obv, realized_volatility, rsi,
     sma, stochastic_k, vwap, williams_r, zscore,
 )
 

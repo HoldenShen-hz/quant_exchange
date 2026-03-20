@@ -861,6 +861,14 @@ class ErrorRecoveryService:
             if time.time() - cb["last_failure_time"] >= cfg.circuit_timeout_seconds:
                 cb["state"] = "HALF_OPEN"
                 cb["success_count"] = 0
+
+        # Compute can_execute based on current state
+        if cb["state"] == "CLOSED":
+            cb["can_execute"] = True
+        elif cb["state"] == "HALF_OPEN":
+            cb["can_execute"] = True
+        else:  # OPEN
+            cb["can_execute"] = False
         return cb
 
     def _record_success(self, operation_name: str) -> None:

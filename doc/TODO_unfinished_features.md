@@ -1,7 +1,7 @@
 # TODO: 未完成功能清单
 
 > 基于 doc/ 全部需求文档与代码库的逐项审计，截至 2026-03-20
-> 整体完成度约 93%（本次更新：EX-08高级EMS完成）
+> 整体完成度约 95%（本次更新：性能压测+端到端测试完成）
 
 ---
 
@@ -144,8 +144,8 @@
 | Prometheus/Grafana监控 | PARTIAL | 指标收集器定义有，未集成Prometheus |
 | CI/CD流水线 | YES | GitHub Actions workflow已创建 (ci.yml) |
 | Docker容器化 | YES | Dockerfile + Dockerfile.prod + docker-compose.yml 已创建 |
-| 性能压测 | NO | 无压力测试 |
-| 端到端测试 | NO | 仅单元测试和集成测试 |
+| 性能压测 | YES | BacktestEngine 100/500/1000 bars压测，12个E2E+性能测试全通过 |
+| 端到端测试 | YES | E2E回测workflow/bot生命周期/算法订单/错误恢复测试全通过 |
 
 ---
 

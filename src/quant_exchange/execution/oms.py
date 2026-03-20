@@ -1065,7 +1065,9 @@ class ExecutionAlgorithmService:
         order_id = f"algo:{uuid4().hex[:12]}"
 
         if algo_type == ExecutionAlgorithmType.TWAP:
-            twap_slices = self._twap.compute_slices(order_id, quantity, limit_price, venue)
+            num_slices = params.get("num_slices", 10)
+            twap = TWAPExecutionAlgorithm(num_slices=num_slices)
+            twap_slices = twap.compute_slices(order_id, quantity, limit_price, venue)
             slices = twap_slices
         elif algo_type == ExecutionAlgorithmType.VWAP:
             vwap_slices = self._vwap.compute_slices(order_id, quantity, limit_price, venue)
