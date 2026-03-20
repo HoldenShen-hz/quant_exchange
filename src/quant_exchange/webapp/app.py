@@ -93,6 +93,10 @@ class StockScreenerWebApp:
             return self._static(start_response, "styles.css", "text/css; charset=utf-8")
         if path == "/static/app.js" and method == "GET":
             return self._static(start_response, "app.js", "application/javascript; charset=utf-8")
+        if path == "/manifest.json" and method == "GET":
+            return self._static(start_response, "manifest.json", "application/manifest+json; charset=utf-8")
+        if path == "/service-worker.js" and method == "GET":
+            return self._static(start_response, "service-worker.js", "application/javascript; charset=utf-8")
         if path == "/api/auth/current" and method == "GET":
             session = self._session(environ)
             if session is None:
@@ -635,6 +639,15 @@ class StockScreenerWebApp:
                     current_price=float(payload.get("current_price", 0)),
                 ),
             )
+        # FT-06: Futures Margin Risk and Liquidation Warnings
+        if path == "/api/futures/margin-risk" and method == "GET":
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            account_code = query.get("account_code", ["futures_main"])[0]
+            return self._json(start_response, self.platform.api.get_futures_margin_risk(account_code))
+        if path == "/api/futures/liquidation-risk" and method == "GET":
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            account_code = query.get("account_code", ["futures_main"])[0]
+            return self._json(start_response, self.platform.api.get_futures_liquidation_risk(account_code))
         # FT-11: Unified Portfolio View
         if path == "/api/unified-portfolio" and method == "GET":
             query = parse_qs(environ.get("QUERY_STRING", ""))
@@ -804,6 +817,12 @@ class StockScreenerWebApp:
             ))
         if path == "/api/futures/positions" and method == "GET":
             return self._json(start_response, self.platform.api.get_futures_positions())
+        if path == "/api/futures/position-analytics" and method == "GET":
+            account_code = params.get("account_code", ["futures_main"])[0]
+            return self._json(start_response, {
+                "code": "OK",
+                "data": self.platform.futures_trading.get_position_analytics(account_code),
+            })
         # ── Technical Indicator APIs (CHART-02) ──────────
         if path == "/api/indicators/calculate" and method == "POST":
             payload = self._read_json(environ)
@@ -812,6 +831,25 @@ class StockScreenerWebApp:
                 prices=payload.get("prices", []),
                 **payload.get("params", {}),
             ))
+        # ── Redis Cache Stats (Redis CACHE) ────────────────────────────────
+        if path == "/api/cache/stats" and method == "GET":
+            cache = getattr(self.platform, "cache", None)
+            if cache is None:
+                return self._json(start_response, {"code": "OK", "data": {"available": False, "backend": "none"}})
+            fallback_stats = getattr(cache, "_fallback", None)
+            fallback_data = {}
+            if fallback_stats is not None:
+                s = fallback_stats.stats()
+                fallback_data = {"hits": s["hits"], "misses": s["misses"], "keys": s["keys"]}
+            return self._json(start_response, {
+                "code": "OK",
+                "data": {
+                    "available": cache.is_available(),
+                    "backend": "redis" if cache.is_available() else "in_memory",
+                    "fallback_stats": fallback_data,
+                    "ping": cache.ping(),
+                },
+            })
         # ── SSE Real-time Event Stream (WebSocket replacement) ──────────
         if path == "/api/events/stream" and method == "GET":
             return self._sse_stream(start_response)

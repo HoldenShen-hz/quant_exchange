@@ -207,11 +207,33 @@ class TwoFactorAuthTests(unittest.TestCase):
         self.assertGreater(len(secret), 0)
 
     def test_verify_2fa_accepts_valid_code(self) -> None:
-        """Verify 2FA accepts any 6-digit code (placeholder)."""
-        self.service.enable_2fa(self.user.user_id)
+        """Verify 2FA accepts a real TOTP code generated from the user's secret."""
+        success, secret = self.service.enable_2fa(self.user.user_id)
+        self.assertTrue(success)
+        self.assertGreater(len(secret), 0)
 
-        result = self.service.verify_2fa(self.user.user_id, "123456")
-
+        # Generate a real TOTP code from the user's secret (same algorithm as service)
+        import base64
+        import hashlib
+        import hmac
+        import struct
+        import time
+        raw = secret.upper().encode()
+        # Pad to multiple of 8
+        raw += b"=" * ((8 - len(raw) % 8) % 8)
+        key = base64.b32decode(raw)
+        counter = int(time.time()) // 30
+        msg = struct.pack(">Q", counter)
+        hmac_hash = hmac.new(key, msg, hashlib.sha1).digest()
+        offset_val = hmac_hash[-1] & 0x0F
+        bin_code = (
+            (hmac_hash[offset_val] & 0x7F) << 24
+            | (hmac_hash[offset_val + 1] & 0xFF) << 16
+            | (hmac_hash[offset_val + 2] & 0xFF) << 8
+            | (hmac_hash[offset_val + 3] & 0xFF)
+        )
+        real_totp = str(bin_code % 10**6)
+        result = self.service.verify_2fa(self.user.user_id, real_totp)
         self.assertTrue(result)
 
     def test_verify_2fa_rejects_invalid_code(self) -> None:

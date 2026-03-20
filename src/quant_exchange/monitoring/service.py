@@ -14,6 +14,7 @@ Implements the documented monitoring features:
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -52,12 +53,16 @@ class MonitoringService:
         *,
         dedup_window: timedelta = timedelta(minutes=5),
         escalation_threshold: int = 3,
+        content_based_dedup: bool = False,  # MO-05: set True for stricter content-based dedup
     ) -> None:
         self.alerts: list[Alert] = []
         self.dedup_window = dedup_window
         self.escalation_threshold = escalation_threshold
+        self.content_based_dedup = content_based_dedup
         # Track recent alerts by code for dedup and escalation
         self._recent_alerts: dict[str, list[datetime]] = defaultdict(list)
+        # Content-based dedup: code -> list of (content_hash, timestamp)
+        self._content_hashes: dict[str, list[tuple[str, datetime]]] = defaultdict(list)
         # Alert suppression windows (code -> suppression_end_time)
         self._suppression: dict[str, datetime] = {}
         # Metrics counters
@@ -85,8 +90,23 @@ class MonitoringService:
             return False
         return True
 
+    def _compute_content_hash(self, message: str, context: dict | None) -> str:
+        """Compute a stable hash of alert content for content-based deduplication."""
+        import hashlib
+        ctx_str = ""
+        if context:
+            # Include only stable context fields (exclude volatile fields like timestamps)
+            stable_fields = {k: v for k, v in context.items() if "time" not in k.lower() and "id" not in k.lower()}
+            ctx_str = json.dumps(stable_fields, sort_keys=True, default=str)
+        content = f"{message}|{ctx_str}"
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+
     def add_alert(self, code: str, severity: AlertSeverity, message: str, *, context: dict | None = None) -> Alert | None:
         """Append a structured alert with deduplication and optional escalation.
+
+        Two dedup strategies:
+        - Code-based: same alert code within dedup_window → escalation on repeat
+        - Content-based: same code + similar message within dedup_window → suppress duplicate
 
         Returns None if the alert is currently suppressed.
         """
@@ -95,7 +115,29 @@ class MonitoringService:
         # Check suppression window
         if self.is_suppressed(code):
             return None
-        # Deduplication: suppress identical alerts within window
+
+        # ── Content-based deduplication ─────────────────────────────────
+        if self.content_based_dedup:
+            content_hash = self._compute_content_hash(message, context)
+            content_cutoff = now - self.dedup_window
+            # Clean expired entries
+            self._content_hashes[code] = [
+                (h, t) for h, t in self._content_hashes[code] if t > content_cutoff
+            ]
+            # Suppress exact content duplicate
+            if any(h == content_hash for h, _ in self._content_hashes[code]):
+                # Still track for escalation purposes, but don't add duplicate to alerts list
+                self._recent_alerts[code] = [
+                    t for t in self._recent_alerts[code] if t > content_cutoff
+                ]
+                self._recent_alerts[code].append(now)
+                # Escalation still applies to repeated code fires even if content duplicates are suppressed
+                if len(self._recent_alerts[code]) >= self.escalation_threshold:
+                    severity = _SEVERITY_ESCALATION.get(severity, severity)
+                return None
+            self._content_hashes[code].append((content_hash, now))
+
+        # ── Code-based deduplication with escalation ─────────────────────
         cutoff = now - self.dedup_window
         recent = [t for t in self._recent_alerts[code] if t > cutoff]
         self._recent_alerts[code] = recent

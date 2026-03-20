@@ -1500,6 +1500,15 @@ tbody tr.is-active {
   background: rgba(255,255,255,0.04);
 }
 
+/* FT-06: Margin risk level indicators */
+.note-risk-safe { color: var(--green); font-weight: 600; }
+.note-risk-warning { color: var(--orange); font-weight: 600; }
+.note-risk-danger { color: #ff6b6b; font-weight: 600; }
+.note-risk-liquidation { color: #ff2d2d; font-weight: 700; animation: blink 1s infinite; }
+@keyframes blink {
+  50% { opacity: 0.5; }
+}
+
 .futures-positions-list {
   margin-top: 10px;
   max-height: 280px;
@@ -2547,6 +2556,94 @@ tbody tr.is-active {
 .f10-metric strong {
   font-size: 15px;
   color: var(--text);
+}
+
+/* Dragon Tiger List (龙虎榜) */
+.dragon-tiger-summary {
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 10px;
+  padding: 8px 12px;
+  background: rgba(255,255,255,0.03);
+  border-radius: 8px;
+}
+.dragon-tiger-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+.dragon-tiger-card {
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--line);
+}
+.dragon-tiger-card.buy { border-left: 3px solid #3fb950; }
+.dragon-tiger-card.sell { border-left: 3px solid #f85149; }
+.dragon-tiger-card.active { border-left: 3px solid #f0883e; }
+.dragon-tiger-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.dragon-tiger-symbol { font-weight: 700; font-size: 14px; color: var(--text); }
+.dragon-tiger-badge { font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 600; }
+.dragon-tiger-badge.buy { background: rgba(63,185,80,0.15); color: #3fb950; }
+.dragon-tiger-badge.sell { background: rgba(248,81,73,0.15); color: #f85149; }
+.dragon-tiger-badge.active { background: rgba(240,136,62,0.15); color: #f0883e; }
+.dragon-tiger-metric { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.dragon-tiger-metric strong { color: var(--text); }
+
+/* MOB-01~05: PWA install banner */
+.pwa-install-banner {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 9999;
+  background: linear-gradient(135deg, #1a3a5c 0%, #0a0e1a 100%);
+  border-top: 1px solid var(--border);
+  padding: 12px 16px;
+  box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.4);
+  animation: slideUp 0.3s ease-out;
+}
+.pwa-install-banner.pwa-update-banner {
+  background: linear-gradient(135deg, #2d1a5c 0%, #0a0e1a 100%);
+}
+@keyframes slideUp {
+  from { transform: translateY(100%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+.pwa-install-inner {
+  max-width: 960px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.pwa-install-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pwa-install-text strong {
+  font-size: 14px;
+  color: var(--text);
+}
+.pwa-install-text span {
+  font-size: 12px;
+  color: var(--muted);
+}
+.pwa-install-actions {
+  display: flex;
+  gap: 8px;
+}
+.pwa-install-banner .primary-button,
+.pwa-install-banner .ghost-button {
+  font-size: 13px;
+  padding: 6px 14px;
 }
 
 /* Responsive: collapse sidebar on small screens */

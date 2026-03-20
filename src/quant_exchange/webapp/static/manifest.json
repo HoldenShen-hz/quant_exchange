@@ -1,0 +1,48 @@
+{
+  "name": "Quant Exchange Trading Terminal",
+  "short_name": "QuantExchange",
+  "description": "Global trading research terminal for stocks, crypto, and futures",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0e1a",
+  "theme_color": "#1a3a5c",
+  "orientation": "portrait-primary",
+  "scope": "/",
+  "lang": "zh-CN",
+  "categories": ["finance", "trading"],
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' fill='%230a0e1a' rx='24'/><path d='M40 140 L70 90 L100 110 L130 60 L160 80' stroke='%2358a6ff' stroke-width='12' fill='none' stroke-linecap='round' stroke-linejoin='round'/><circle cx='160' cy='80' r='10' fill='%23f0883e'/></svg>",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' fill='%230a0e1a' rx='64'/><path d='M100 380 L180 240 L260 290 L340 160 L430 210' stroke='%2358a6ff' stroke-width='32' fill='none' stroke-linecap='round' stroke-linejoin='round'/><circle cx='430' cy='210' r='28' fill='%23f0883e'/></svg>",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "screenshots": [],
+  "shortcuts": [
+    {
+      "name": "自选股",
+      "short_name": "自选",
+      "url": "/#watchlist",
+      "description": "查看自选股列表"
+    },
+    {
+      "name": "智能选股",
+      "short_name": "AI选股",
+      "url": "/#ai-screener",
+      "description": "AI驱动的股票筛选"
+    },
+    {
+      "name": "期货交易",
+      "short_name": "期货",
+      "url": "/#futures-trading",
+      "description": "期货模拟交易"
+    }
+  ]
+}

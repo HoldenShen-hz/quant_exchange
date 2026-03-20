@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from datetime import timedelta
+from typing import Any
 
 from quant_exchange.core.models import (
     BacktestResult,
@@ -13,6 +14,7 @@ from quant_exchange.core.models import (
     PortfolioSnapshot,
     RiskDecision,
 )
+from quant_exchange.backtest.multi_asset import BiasAuditService
 from quant_exchange.core.utils import annualize_return, max_drawdown, safe_div, sharpe_ratio, sortino_ratio
 from quant_exchange.execution.oms import OrderManager, PaperExecutionEngine
 from quant_exchange.monitoring.service import MonitoringService
@@ -30,9 +32,23 @@ class BacktestEngine:
         fee_rate: float = 0.001,
         slippage_bps: float = 5.0,
         bias_window: timedelta = timedelta(days=1),
+        bias_audit: BiasAuditService | None = None,
     ) -> None:
         self.execution = PaperExecutionEngine(fee_rate=fee_rate, slippage_bps=slippage_bps)
         self.bias_window = bias_window
+        self.bias_audit = bias_audit if bias_audit is not None else BiasAuditService()
+
+    def _run_bias_audit(self, strategy_id: str, klines: list[Kline], orders, fills) -> Any:
+        """Run bias audit if configured (BT-08)."""
+        try:
+            return self.bias_audit.audit_backtest(
+                strategy_id=strategy_id,
+                klines=klines,
+                orders=list(orders),
+                fills=list(fills),
+            )
+        except Exception:
+            return None
 
     def run(
         self,
@@ -150,6 +166,7 @@ class BacktestEngine:
             alerts=tuple(monitoring.alerts),
             bias_history=tuple(bias_history),
             risk_rejections=tuple(risk_rejections),
+            audit_result=self._run_bias_audit(strategy.strategy_id, klines, oms.orders.values(), fills) if self.bias_audit else None,
         )
 
     def _metrics(self, equity_curve: list[tuple], fills) -> PerformanceMetrics:

@@ -16,6 +16,7 @@ from quant_exchange.bots import StrategyBotService
 from quant_exchange.config.settings import AppSettings
 from quant_exchange.crypto import CryptoWorkbenchService
 from quant_exchange.futures import FuturesWorkbenchService
+from quant_exchange.infrastructure.cache import CacheService, RedisCacheService, InMemoryCacheService
 from quant_exchange.futures.service import FuturesTradingService
 from quant_exchange.enhanced import (
     AdvancedExecutionService,
@@ -40,12 +41,14 @@ from quant_exchange.ingestion.background_downloader import HistoryDownloadSuperv
 from quant_exchange.intelligence.service import IntelligenceEngine
 from quant_exchange.learning import LearningHubService
 from quant_exchange.marketdata.service import MarketDataStore
-from quant_exchange.monitoring.service import MonitoringService
+from quant_exchange.monitoring.service import MonitoringService, NotificationService
 from quant_exchange.persistence.database import SQLitePersistence
 from quant_exchange.portfolio.service import PortfolioManager
 from quant_exchange.reporting.service import ReportingService
+from quant_exchange.reporting.compliance import ComplianceReportService
 from quant_exchange.risk.service import RiskEngine
 from quant_exchange.rules.engine import MarketRuleEngine
+from quant_exchange.rules.approval import ApprovalService
 from quant_exchange.scheduler.service import JobScheduler
 from quant_exchange.security.service import SecurityService
 from quant_exchange.simulation import SimulatedTradingService
@@ -62,12 +65,16 @@ class QuantTradingPlatform:
         self.settings = settings or AppSettings()
         self.persistence = SQLitePersistence(self.settings.database.url)
         self.market_data = MarketDataStore()
+        # Redis caching layer — falls back to in-memory if Redis is unavailable
+        self.cache: CacheService = RedisCacheService()
         self.intelligence = IntelligenceEngine()
         self._seed_intelligence_data()
         self.learning = LearningHubService()
         self.risk = RiskEngine()
         self.monitoring = MonitoringService()
+        self.notification_service = NotificationService()
         self.reporting = ReportingService()
+        self.compliance_reporting = ComplianceReportService()  # RP-06: compliance reports
         self.security = SecurityService()
         self.portfolio = PortfolioManager()
         self.oms = OrderManager()
@@ -77,6 +84,7 @@ class QuantTradingPlatform:
         self.strategy_registry.register(MovingAverageSentimentStrategy(strategy_id="ma_sentiment"))
         self.adapters = AdapterRegistry()
         self.market_rules = MarketRuleEngine()
+        self.approval = ApprovalService()  # EX-06: three-tier approval workflow
         self.scheduler = JobScheduler(self.persistence)
         self.universes = UniverseService(self.persistence)
         self.features = FeatureStoreService(self.persistence)
@@ -97,7 +105,7 @@ class QuantTradingPlatform:
             backtest_engine=self.backtest,
             intelligence_engine=self.intelligence,
         )
-        self.bot_center = StrategyBotService(self.persistence, self.stocks)
+        self.bot_center = StrategyBotService(self.persistence, self.stocks, self.notification_service)
         self.web_workspace = WebWorkspaceService(self.persistence)
         # SW-14: Smart Screener with NLP query support
         self.smart_screener = SmartScreenerService(self.persistence)
@@ -107,7 +115,7 @@ class QuantTradingPlatform:
         self.attribution = AttributionAnalyzer()
         self.multi_account = MultiAccountAllocator(self.persistence)
         self._register_default_adapters()
-        self.crypto = CryptoWorkbenchService(self.adapters, self.market_data)
+        self.crypto = CryptoWorkbenchService(self.adapters, self.market_data, cache_service=self.cache)
         self.futures = FuturesWorkbenchService(self.adapters, self.market_data)
         self.futures_trading = FuturesTradingService()
         self.stocks.bootstrap_persisted_or_demo_directory()

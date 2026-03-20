@@ -129,6 +129,10 @@ class SecurityService:
         self._encrypted_credentials: dict[str, EncryptedCredential] = {}
         self._session_ttl = timedelta(minutes=session_ttl_minutes)
         self._encryption_key: bytes | None = None
+        # SE-07: Fine-grained resource-level permissions
+        # key = (user_id, resource, action_value) → metadata dict
+        self._explicit_grants: dict[tuple[str, str, str], dict] = {}
+        self._explicit_denies: dict[tuple[str, str, str], dict] = {}
 
     # ==================== Password Hashing ====================
 
@@ -308,33 +312,88 @@ class SecurityService:
         self._sessions[session_id] = session
         return session
 
-    # ==================== 2FA (Placeholder) ====================
+    # ==================== SE-06: Two-Factor Authentication ====================
 
     def enable_2fa(self, user_id: str) -> tuple[bool, str]:
-        """Enable 2FA for a user. Returns (success, secret).
+        """Enable TOTP 2FA for a user (SE-06). Returns (success, base32_secret).
 
-        The secret should be displayed as a QR code by the caller.
-        This is a placeholder implementation.
+        The returned secret should be encoded as a TOTP URI for QR code display.
+        Callers can generate QR code from:
+          otpauth://totp/QuantExchange:{username}?secret={secret}&issuer=QuantExchange&algorithm=SHA1&digits=6&period=30
         """
         user = self._users.get(user_id)
         if user is None:
             return (False, "")
 
-        secret = secrets.token_hex(20)
+        # Generate a 160-bit random secret (base32-encoded = 32 chars)
+        import base64
+        raw_secret = secrets.token_bytes(20)
+        secret_b32 = base64.b32encode(raw_secret).decode().rstrip("=")
         user.two_factor_enabled = True
-        user.two_factor_secret = secret
-
-        return (True, secret)
+        user.two_factor_secret = secret_b32
+        return (True, secret_b32)
 
     def verify_2fa(self, user_id: str, code: str) -> bool:
-        """Verify a 2FA code. This is a placeholder - accepts any 6-digit code."""
+        """Verify a TOTP code using HMAC-SHA1 (RFC 6238) (SE-06).
+
+        Allows ±1 time window (30 seconds) to handle clock skew.
+        """
+        import base64
+        import hashlib
+        import hmac
+        import struct
+        import time
+
         user = self._users.get(user_id)
-        if user is None or not user.two_factor_enabled:
+        if user is None or not user.two_factor_enabled or not user.two_factor_secret:
             return False
 
-        # Placeholder: Accept any 6-digit code for now
-        # In production, use TOTP to verify
-        return len(code) == 6 and code.isdigit()
+        if not (len(code) == 6 and code.isdigit()):
+            return False
+
+        secret = user.two_factor_secret.upper().encode()
+        # Pad base32 secret to multiple of 8
+        secret += b"=" * (8 - len(secret) % 8) if len(secret) % 8 else b""
+        try:
+            key = base64.b32decode(secret)
+        except Exception:
+            return False
+
+        # TOTP: HTOP(token) = HMAC-SHA1(key, counter)
+        # counter = floor(unix_timestamp / 30)
+        current_counter = int(time.time()) // 30
+
+        # Allow ±1 window for clock skew
+        for offset in (-1, 0, 1):
+            counter = current_counter + offset
+            msg = struct.pack(">Q", counter)
+            hmac_hash = hmac.new(key, msg, hashlib.sha1).digest()
+            offset_val = hmac_hash[-1] & 0x0F
+            bin_code = (
+                (hmac_hash[offset_val] & 0x7F) << 24
+                | (hmac_hash[offset_val + 1] & 0xFF) << 16
+                | (hmac_hash[offset_val + 2] & 0xFF) << 8
+                | (hmac_hash[offset_val + 3] & 0xFF)
+            )
+            totp = str(bin_code % 10**6)
+            if hmac.compare_digest(totp, code):
+                return True
+        return False
+
+    def get_2fa_uri(self, user_id: str, username: str) -> str | None:
+        """Return an otpauth:// URI for QR code generation (SE-06)."""
+        user = self._users.get(user_id)
+        if user is None or not user.two_factor_enabled or not user.two_factor_secret:
+            return None
+        import urllib.parse
+        params = urllib.parse.urlencode({
+            "secret": user.two_factor_secret,
+            "issuer": "QuantExchange",
+            "algorithm": "SHA1",
+            "digits": "6",
+            "period": "30",
+        })
+        return f"otpauth://totp/QuantExchange:{urllib.parse.quote(username)}?{params}"
 
     # ==================== API Key Encryption (SE-05) ====================
 
@@ -491,6 +550,134 @@ class SecurityService:
         result["user_id"] = user.user_id
         return result
 
+    # ==================== SE-07: Fine-Grained Access Control =====================
+
+    def authorize_resource(
+        self,
+        user_id: str,
+        action: Action,
+        resource: str,
+        *,
+        resource_type: str | None = None,
+    ) -> dict[str, Any]:
+        """Check fine-grained permission for a user × resource × action (SE-07).
+
+        Permission resolution order:
+          1. Explicit DENY on (user, resource, action) → denied
+          2. Explicit GRANT on (user, resource, action) → allowed
+          3. Role-based permission → use DEFAULT_PERMISSIONS
+          4. Default deny
+
+        Args:
+            user_id: The user attempting the action.
+            action: The action being attempted.
+            resource: The resource identifier (e.g. "strategy:ma_sentiment", "order:ORD123").
+            resource_type: Optional type hint (e.g. "strategy", "order", "instrument").
+        """
+        user = self._users.get(user_id)
+        if user is None:
+            return {"allowed": False, "reason": "user_not_found", "source": "user"}
+
+        # Check explicit deny list first (user-level revocation)
+        deny_key = (user_id, resource, action.value)
+        if deny_key in self._explicit_denies:
+            return {
+                "allowed": False,
+                "reason": f"explicit_deny on resource '{resource}'",
+                "source": "explicit_deny",
+                "user_id": user_id,
+            }
+
+        # Check explicit grant list (user-level permission)
+        grant_key = (user_id, resource, action.value)
+        if grant_key in self._explicit_grants:
+            return {
+                "allowed": True,
+                "reason": f"explicit_grant on resource '{resource}'",
+                "source": "explicit_grant",
+                "user_id": user_id,
+            }
+
+        # Fall back to role-based
+        if self.authorize(user.role, action):
+            return {
+                "allowed": True,
+                "reason": f"role_based: {user.role.value} has {action.value}",
+                "source": "role",
+                "user_id": user_id,
+            }
+
+        return {
+            "allowed": False,
+            "reason": f"role {user.role.value} lacks {action.value} on '{resource}'",
+            "source": "role",
+            "user_id": user_id,
+        }
+
+    def grant_resource_permission(
+        self,
+        user_id: str,
+        resource: str,
+        action: Action,
+        granted_by: str,
+    ) -> bool:
+        """Grant a user explicit permission on a specific resource (SE-07)."""
+        if user_id not in self._users:
+            return False
+        key = (user_id, resource, action.value)
+        self._explicit_grants[key] = {"granted_by": granted_by, "granted_at": utc_now()}
+        self.record_event(
+            actor=granted_by,
+            action=Action.DEPLOY_STRATEGY,  # proxy action
+            resource=f"permission:grant:{user_id}:{resource}:{action.value}",
+            success=True,
+            event_type="permission_granted",
+        )
+        return True
+
+    def revoke_resource_permission(
+        self,
+        user_id: str,
+        resource: str,
+        action: Action,
+        revoked_by: str,
+    ) -> bool:
+        """Revoke an explicit permission (SE-07)."""
+        if user_id not in self._users:
+            return False
+        key = (user_id, resource, action.value)
+        if key in self._explicit_grants:
+            del self._explicit_grants[key]
+        # Add to explicit deny to prevent re-grant
+        deny_key = (user_id, resource, action.value)
+        self._explicit_denies[deny_key] = {"revoked_by": revoked_by, "revoked_at": utc_now()}
+        self.record_event(
+            actor=revoked_by,
+            action=Action.DEPLOY_STRATEGY,
+            resource=f"permission:revoke:{user_id}:{resource}:{action.value}",
+            success=True,
+            event_type="permission_revoked",
+        )
+        return True
+
+    def list_resource_permissions(self, user_id: str) -> dict[str, list[str]]:
+        """List all explicit permissions for a user (SE-07)."""
+        grants = [
+            {"resource": r, "action": a, "key": k}
+            for (uid, r, a), k in self._explicit_grants.items()
+            if uid == user_id
+        ]
+        denies = [
+            {"resource": r, "action": a}
+            for (uid, r, a) in self._explicit_denies.keys()
+            if uid == user_id
+        ]
+        return {
+            "user_id": user_id,
+            "grants": grants,
+            "denies": denies,
+        }
+
     # ==================== Audit Logging ====================
 
     def record_event(self, actor: str, action: Action, resource: str, success: bool, **details) -> AuditEvent:
@@ -499,6 +686,10 @@ class SecurityService:
         event = AuditEvent(actor=actor, action=action, resource=resource, timestamp=utc_now(), success=success, details=details)
         self.audit_log.append(event)
         return event
+
+    def log_audit_event(self, actor: str, action: Action, resource: str, success: bool, details: dict | None = None) -> AuditEvent:
+        """Alias for record_event for API audit logging (SE-03)."""
+        return self.record_event(actor=actor, action=action, resource=resource, success=success, **(details or {}))
 
     def query_audit_log(
         self,

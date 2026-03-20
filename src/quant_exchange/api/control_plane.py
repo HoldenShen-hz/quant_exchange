@@ -36,8 +36,14 @@ class ControlPlaneAPI:
         self.adapters = adapter_registry
         self.scheduler = scheduler
         self.market_rules = market_rules
+        self.security = getattr(platform, 'security', None)
         self.sessions: dict[str, dict[str, Any]] = {}
         self._watchlist_groups: dict[str, dict] = {}
+
+    def _audit(self, actor: str, action, resource: str, success: bool, details: dict | None = None) -> None:
+        """Record an audit event if security service is available (SE-03)."""
+        if self.security is not None:
+            self.security.log_audit_event(actor=actor, action=action, resource=resource, success=success, details=details)
 
     def create_user(self, username: str, password: str, role: Role, display_name: str | None = None) -> dict:
         """Create a user and assign an initial role."""
@@ -419,6 +425,36 @@ class ControlPlaneAPI:
             return self._ok(self.platform.futures_trading.mark_to_market(account_code, instrument_id, current_price))
         except Exception as exc:
             return self._error("TEMPORARILY_UNAVAILABLE", f"Mark to market failed: {exc}")
+
+    # ─── FT-06: Futures Margin Risk and Liquidation Warnings ───────────────────────
+
+    def get_futures_margin_risk(self, account_code: str = "futures_main") -> dict:
+        """Return futures account margin risk assessment (FT-06)."""
+        try:
+            account = self.platform.futures_trading.get_or_create_account(account_code)
+            margin_ratio = account.current_equity / max(account.margin_used, 1)
+            risk = self.platform.futures_trading._assess_margin_risk(account, margin_ratio)
+            return self._ok({
+                "account_code": account_code,
+                "margin_ratio": round(margin_ratio, 4),
+                "maintenance_margin_ratio": 0.667,
+                "equity": account.current_equity,
+                "margin_used": account.margin_used,
+                **risk,
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Margin risk check failed: {exc}")
+
+    def get_futures_liquidation_risk(self, account_code: str = "futures_main") -> dict:
+        """Return position-level liquidation risk analysis (FT-06)."""
+        try:
+            warnings = self.platform.futures_trading.check_liquidation_risk(account_code)
+            return self._ok({
+                "account_code": account_code,
+                "warnings": warnings,
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Liquidation risk check failed: {exc}")
 
     # ─── FT-11: Unified Cross-Market Portfolio View ─────────────────────────────────
 
@@ -1042,6 +1078,7 @@ class ControlPlaneAPI:
             payload,
             extra_columns={"strategy_code": strategy_code, "mode": "BACKTEST", "status": "COMPLETED"},
         )
+        self._audit(actor="api", action=Action.RUN_BACKTEST, resource=f"{strategy_code}:{instrument_id}", success=True, details={"run_id": payload["run_id"], "initial_cash": initial_cash, "metrics": self._serialize(result.metrics)})
         return self._ok(payload)
 
     def create_intel_source(self, source_code: str, source_name: str, source_type: str) -> dict:
@@ -1136,6 +1173,7 @@ class ControlPlaneAPI:
             available_position_qty=available_position_qty,
         )
         if not market_decision.approved:
+            self._audit(actor="api", action=Action.SUBMIT_ORDER, resource=f"{exchange_code}:{request.instrument_id}", success=False, details={"reason": "market_rule_rejected", "reasons": market_decision.reasons})
             return self._error("MARKET_RULE_REJECTED", ",".join(market_decision.reasons))
         snapshot = self.platform.portfolio.mark_to_market({request.instrument_id: self.platform.market_data.latest_price(request.instrument_id)})
         risk_decision = self.platform.risk.evaluate_order(
@@ -1145,6 +1183,7 @@ class ControlPlaneAPI:
             snapshot=snapshot,
         )
         if not risk_decision.approved:
+            self._audit(actor="api", action=Action.SUBMIT_ORDER, resource=f"{exchange_code}:{request.instrument_id}", success=False, details={"reason": "risk_rejected"})
             return self._error("RISK_REJECTED", ",".join(risk_decision.reasons))
         order = self.platform.oms.submit_order(request)
         venue_response = self.adapters.get_execution(exchange_code).submit_order(request)
@@ -1159,6 +1198,7 @@ class ControlPlaneAPI:
                 "status": order.status.value,
             },
         )
+        self._audit(actor="api", action=Action.SUBMIT_ORDER, resource=f"{exchange_code}:{request.instrument_id}", success=True, details={"order_id": order.order_id, "instrument_id": request.instrument_id, "side": request.side.value, "quantity": request.quantity})
         return self._ok({"order_id": order.order_id, "venue_response": venue_response})
 
     def list_orders(self) -> dict:
@@ -1171,6 +1211,7 @@ class ControlPlaneAPI:
 
         order = self.platform.oms.cancel_order(order_id)
         venue_response = self.adapters.get_execution(exchange_code).cancel_order(order_id)
+        self._audit(actor="api", action=Action.CANCEL_ORDER, resource=f"{exchange_code}:{order_id}", success=True, details={"order_id": order_id, "instrument_id": order.request.instrument_id})
         self.persistence.upsert_record(
             "trade_orders",
             "order_id",
@@ -1677,12 +1718,14 @@ class ControlPlaneAPI:
         if self.platform.futures_trading is None:
             return self._error("NOT_IMPLEMENTED", "Futures trading not available")
         result = self.platform.futures_trading.submit_order(
+            account_code="futures_main",
             instrument_id=instrument_id,
-            side=side,
+            direction=side,
             quantity=quantity,
             order_type=order_type,
             limit_price=limit_price,
         )
+        self._audit(actor="api", action=Action.SUBMIT_ORDER, resource=f"futures:{instrument_id}", success=True, details={"instrument_id": instrument_id, "side": side, "quantity": quantity, "order_id": result.order_id})
         return self._ok(result)
 
     def get_futures_positions(self) -> dict:

@@ -715,6 +715,28 @@ class BatchBacktestResult:
     parameter_sweep_summary: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class WalkForwardResult:
+    """Result of a walk-forward optimization backtest (BT-06).
+
+    Contains per-window train/test results, combined equity curve,
+    and walk-forward efficiency metrics.
+    """
+    batch_id: str
+    strategy_id: str
+    total_windows: int
+    window_results: list[dict]  # [{train_sharpe, test_sharpe, best_params, train_return, test_return, equity_curve}]
+    combined_equity_curve: list[tuple[str, float]]  # [(date_str, equity)]
+    walk_forward_efficiency: float  # avg out-of-sample sharpe / avg in-sample sharpe
+    avg_in_sample_sharpe: float
+    avg_out_of_sample_sharpe: float
+    avg_in_sample_return: float
+    avg_out_of_sample_return: float
+    best_overall_window: int  # index of window with best OOS sharpe
+    parameter_stability: dict[str, float]  # param_name -> coefficient of variation
+    parameter_sweep_summary: dict[str, Any] = field(default_factory=dict)
+
+
 class BatchBacktestEngine:
     """Run multiple backtest variations for parameter optimization (BT-06).
 
@@ -881,6 +903,209 @@ class BatchBacktestEngine:
             results=results,
             best_result=best_result,
             parameter_sweep_summary={"type": "rolling_window"},
+        )
+
+    def run_rolling_window_walkforward(
+        self,
+        *,
+        strategy: BaseStrategy,
+        instrument: Instrument,
+        klines: list[Kline],
+        intelligence_engine,
+        risk_engine: RiskEngine,
+        parameter_grid: dict[str, list[Any]],
+        train_window_days: int = 60,
+        test_window_days: int = 20,
+        step_days: int = 10,
+        purge_days: int = 5,  # gap between train end and test start to prevent look-ahead
+        initial_cash: float = 100_000.0,
+    ) -> WalkForwardResult:
+        """Run walk-forward optimization with proper train→optimize→test cycle (BT-06).
+
+        Each window:
+          1. Run backtest on train period (in-sample)
+          2. Sweep parameters on train period → find best params
+          3. Apply best params → run backtest on test period (out-of-sample)
+          4. Advance window by step_days
+
+        This is the gold-standard approach for avoiding overfitting to historical data.
+        """
+        import itertools
+
+        batch_id = f"wf_{uuid.uuid4().hex[:12]}"
+        all_klines = sorted(klines, key=lambda k: k.close_time)
+
+        if len(all_klines) < train_window_days + test_window_days:
+            return WalkForwardResult(
+                batch_id=batch_id,
+                strategy_id=strategy.strategy_id,
+                total_windows=0,
+                window_results=[],
+                combined_equity_curve=[],
+                walk_forward_efficiency=0.0,
+                avg_in_sample_sharpe=0.0,
+                avg_out_of_sample_sharpe=0.0,
+                avg_in_sample_return=0.0,
+                avg_out_of_sample_return=0.0,
+                best_overall_window=-1,
+                parameter_stability={},
+            )
+
+        start_time = all_klines[0].close_time
+        end_time = all_klines[-1].close_time
+        current_train_start = start_time
+
+        window_results: list[dict] = []
+        param_names = list(parameter_grid.keys())
+        param_values = list(parameter_grid.values())
+        param_combinations = list(itertools.product(*param_values))
+        all_equity_curves: list[tuple[str, float]] = []
+
+        train_sharpes: list[float] = []
+        test_sharpes: list[float] = []
+        train_returns: list[float] = []
+        test_returns: list[float] = []
+        best_overall_idx = -1
+        best_oos_sharpe = float("-inf")
+        param_history: dict[str, list[float]] = {p: [] for p in param_names}
+
+        window_idx = 0
+
+        while True:
+            from datetime import timedelta as td
+            train_end = current_train_start + td(days=train_window_days)
+            purge_end = train_end + td(days=purge_days)
+            test_end = purge_end + td(days=test_window_days)
+
+            if test_end > end_time:
+                break
+
+            # Slice train klines (before purge gap)
+            train_klines = [k for k in all_klines if current_train_start <= k.close_time <= train_end]
+            # Test klines (after purge gap)
+            test_klines = [k for k in all_klines if purge_end < k.close_time <= test_end]
+
+            if len(train_klines) < 10 or len(test_klines) < 5:
+                current_train_start += td(days=step_days)
+                continue
+
+            # ── Step 1: Run full parameter sweep on train (in-sample) ──
+            best_train_sharpe = float("-inf")
+            best_train_params: dict[str, Any] = {}
+            sweep_results: list[tuple[dict[str, Any], float]] = []  # (params, sharpe)
+
+            for combo in param_combinations:
+                params = dict(zip(param_names, combo))
+                if hasattr(strategy, "set_parameters"):
+                    strategy.set_parameters(params)
+
+                train_res = self.backtest_engine.run(
+                    instrument=instrument,
+                    klines=train_klines,
+                    strategy=strategy,
+                    intelligence_engine=intelligence_engine,
+                    risk_engine=risk_engine,
+                    initial_cash=initial_cash,
+                )
+                sh = train_res.metrics.sharpe
+                sweep_results.append((params, sh))
+                if sh > best_train_sharpe:
+                    best_train_sharpe = sh
+                    best_train_params = params.copy()
+
+            # Record parameter history for stability analysis
+            for pname, pval in best_train_params.items():
+                if isinstance(pval, (int, float)):
+                    param_history[pname].append(pval)
+
+            # ── Step 2: Apply best params → run on test (out-of-sample) ──
+            if hasattr(strategy, "set_parameters"):
+                strategy.set_parameters(best_train_params)
+
+            test_res = self.backtest_engine.run(
+                instrument=instrument,
+                klines=test_klines,
+                strategy=strategy,
+                intelligence_engine=intelligence_engine,
+                risk_engine=risk_engine,
+                initial_cash=initial_cash,
+            )
+
+            # ── Step 3: Collect equity curve from test period ──
+            for trade in test_res.trades:
+                date_str = trade.exit_time.date().isoformat() if trade.exit_time else "unknown"
+                all_equity_curves.append((date_str, trade.cumulative_equity))
+
+            # ── Step 4: Record window metrics ──
+            train_sharpes.append(best_train_sharpe)
+            test_sharpes.append(test_res.metrics.sharpe)
+            train_returns.append(train_res.metrics.total_return)
+            test_returns.append(test_res.metrics.total_return)
+
+            if test_res.metrics.sharpe > best_oos_sharpe:
+                best_oos_sharpe = test_res.metrics.sharpe
+                best_overall_idx = window_idx
+
+            window_results.append({
+                "window": window_idx,
+                "train_start": current_train_start.isoformat(),
+                "train_end": train_end.isoformat(),
+                "test_start": purge_end.isoformat(),
+                "test_end": test_end.isoformat(),
+                "train_sharpe": best_train_sharpe,
+                "test_sharpe": test_res.metrics.sharpe,
+                "train_return": train_res.metrics.total_return,
+                "test_return": test_res.metrics.total_return,
+                "best_params": best_train_params,
+                "train_trades": len(train_res.trades),
+                "test_trades": len(test_res.trades),
+                "train_drawdown": train_res.metrics.max_drawdown,
+                "test_drawdown": test_res.metrics.max_drawdown,
+            })
+
+            current_train_start += td(days=step_days)
+            window_idx += 1
+
+        # ── Compute walk-forward efficiency ratio ──
+        n = len(train_sharpes)
+        avg_in_sample = sum(train_sharpes) / n if n else 0.0
+        avg_out_sample = sum(test_sharpes) / n if n else 0.0
+        wf_efficiency = (avg_out_sample / avg_in_sample) if avg_in_sample != 0 else 0.0
+
+        # ── Parameter stability (coefficient of variation) ──
+        param_stability: dict[str, float] = {}
+        for pname, vals in param_history.items():
+            if len(vals) > 1:
+                mean_v = sum(vals) / len(vals)
+                if mean_v != 0:
+                    variance = sum((v - mean_v) ** 2 for v in vals) / len(vals)
+                    cv = (variance ** 0.5) / abs(mean_v)
+                    param_stability[pname] = round(cv, 4)
+                else:
+                    param_stability[pname] = 0.0
+
+        return WalkForwardResult(
+            batch_id=batch_id,
+            strategy_id=strategy.strategy_id,
+            total_windows=n,
+            window_results=window_results,
+            combined_equity_curve=all_equity_curves,
+            walk_forward_efficiency=round(wf_efficiency, 4),
+            avg_in_sample_sharpe=round(avg_in_sample, 4),
+            avg_out_of_sample_sharpe=round(avg_out_sample, 4),
+            avg_in_sample_return=round(sum(train_returns) / n if n else 0.0, 4),
+            avg_out_of_sample_return=round(sum(test_returns) / n if n else 0.0, 4),
+            best_overall_window=best_overall_idx,
+            parameter_stability=param_stability,
+            parameter_sweep_summary={
+                "type": "walk_forward_optimization",
+                "train_window_days": train_window_days,
+                "test_window_days": test_window_days,
+                "step_days": step_days,
+                "purge_days": purge_days,
+                "parameter_combinations": len(param_combinations),
+                "parameter_names": param_names,
+            },
         )
 
     def run_in_sample_out_of_sample(

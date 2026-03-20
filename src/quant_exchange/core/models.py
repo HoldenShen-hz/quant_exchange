@@ -481,6 +481,7 @@ class BacktestResult:
     alerts: tuple[Alert, ...]
     bias_history: tuple[DirectionalBias, ...]
     risk_rejections: tuple[RiskDecision, ...]
+    audit_result: Any = None  # BT-08: BiasAuditResult from BiasAuditService
 
 
 @dataclass(slots=True, frozen=True)
@@ -493,3 +494,33 @@ class AuditEvent:
     timestamp: datetime
     success: bool
     details: dict[str, Any] = field(default_factory=dict)
+
+
+# ─── MD-10: Corporate Actions ──────────────────────────────────────────────────
+
+@dataclass(slots=True, frozen=True)
+class CorporateAction:
+    """Represents a corporate action event (dividend, split, rights issue, merger).
+
+    Used for:
+    - Backtest price adjustments (split-adjusted, dividend-adjusted prices)
+    - Fundamental event tracking (ex-date, record date, payment date)
+    - Reference data (MD-10)
+    """
+
+    action_id: str
+    instrument_id: str
+    event_type: str  # "dividend" | "split" | "rights_issue" | "merger" | "spinoff"
+    ex_date: datetime | None  # First day without the dividend/split benefit
+    record_date: datetime | None
+    payment_date: datetime | None
+    # For dividends
+    dividend_per_share: float | None = None
+    # For splits
+    split_ratio: tuple[int, int] | None = None  # e.g. (2, 1) = 2-for-1 split
+    # For rights issues
+    rights_issue_price: float | None = None
+    # For all
+    currency: str = "CNY"
+    status: str = "announced"  # "announced" | "confirmed" | "completed" | "cancelled"
+    created_at: datetime = field(default_factory=utc_now)

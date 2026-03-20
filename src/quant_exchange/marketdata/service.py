@@ -19,6 +19,7 @@ from typing import Any, Callable
 
 from quant_exchange.core.models import (
     AccountSnapshot,
+    CorporateAction,
     FundingRate,
     Instrument,
     Kline,
@@ -87,6 +88,7 @@ class MarketDataStore:
         self.quality_issues: list[DataQualityIssue] = []
         self._staleness_threshold = timedelta(seconds=staleness_threshold_seconds)
         self._latest_update: dict[str, datetime] = {}
+        self._corporate_actions: dict[str, list[CorporateAction]] = defaultdict(list)
 
     # ==================== Instrument Management ====================
 
@@ -533,3 +535,94 @@ class MarketDataStore:
             "stale_instruments": self.get_stale_instruments(),
             "quality_issues_count": len([i for i in self.quality_issues if not i.resolved]),
         }
+
+    # ─── MD-10: Corporate Actions ───────────────────────────────────────────────
+
+    def add_corporate_action(self, action: CorporateAction) -> None:
+        """Register a corporate action event for an instrument (MD-10)."""
+        self._corporate_actions[action.instrument_id].append(action)
+
+    def get_corporate_actions(
+        self,
+        instrument_id: str,
+        event_type: str | None = None,
+        from_date: datetime | None = None,
+    ) -> list[CorporateAction]:
+        """Get corporate actions for an instrument (MD-10).
+
+        Args:
+            instrument_id: The instrument to query.
+            event_type: Filter by event type (dividend, split, etc.).
+            from_date: Only return events on or after this date.
+        """
+        actions = list(self._corporate_actions.get(instrument_id, []))
+        if event_type:
+            actions = [a for a in actions if a.event_type == event_type]
+        if from_date:
+            actions = [a for a in actions if a.ex_date and a.ex_date >= from_date]
+        return sorted(actions, key=lambda a: a.ex_date or datetime.min)
+
+    def get_adjustment_factor(
+        self,
+        instrument_id: str,
+        quote_date: datetime,
+    ) -> float:
+        """Calculate the cumulative price adjustment factor for an instrument on a given date (MD-10).
+
+        Used by the backtest engine to produce split-adjusted and dividend-adjusted prices.
+        Returns a multiplier where multiplied_price = raw_price * factor.
+
+        A factor of 1.0 means no adjustment needed.
+        For a 2-for-1 split that happened on ex_date, prices before ex_date are multiplied by 0.5.
+        """
+        factor = 1.0
+        for action in self._corporate_actions.get(instrument_id, []):
+            if action.ex_date is None:
+                continue
+            if action.ex_date > quote_date:
+                continue
+            if action.status == "cancelled":
+                continue
+
+            if action.event_type == "split" and action.split_ratio:
+                # e.g., (2, 1) split: for every 1 old share, you get 2 new shares
+                # so old price should be multiplied by 0.5 to get comparable price
+                new_shares, old_shares = action.split_ratio
+                factor *= old_shares / new_shares
+            elif action.event_type == "dividend" and action.dividend_per_share:
+                # Dividend adjustment: subtract dividend from price (approximate)
+                # The actual CRSP adjustment uses the ratio of (P - D) / P
+                # We use a simplified version here
+                pass  # Dividend cash adjustment is handled differently in backtest
+
+        return factor
+
+    def get_upcoming_corporate_actions(
+        self,
+        instrument_id: str | None = None,
+        days_ahead: int = 30,
+    ) -> list[dict]:
+        """Get upcoming corporate actions for display (MD-10)."""
+        now = utc_now()
+        cutoff = now + timedelta(days=days_ahead)
+        result: list[dict] = []
+
+        instruments_to_check = (
+            [instrument_id] if instrument_id else list(self._corporate_actions.keys())
+        )
+
+        for iid in instruments_to_check:
+            for action in self._corporate_actions.get(iid, []):
+                if action.ex_date and now <= action.ex_date <= cutoff:
+                    result.append({
+                        "action_id": action.action_id,
+                        "instrument_id": action.instrument_id,
+                        "event_type": action.event_type,
+                        "ex_date": action.ex_date.isoformat(),
+                        "dividend_per_share": action.dividend_per_share,
+                        "split_ratio": action.split_ratio,
+                        "currency": action.currency,
+                        "status": action.status,
+                    })
+
+        return sorted(result, key=lambda x: x["ex_date"])

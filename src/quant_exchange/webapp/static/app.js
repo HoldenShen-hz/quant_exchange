@@ -48,6 +48,8 @@ const CHART_MODES = [
   { value: "intraday", label: "分时" },
   { value: "chip", label: "筹码" },
   { value: "tpo", label: "TPO" },
+  { value: "moneyflow", label: "资金流" },
+  { value: "footprint", label: " footprint" },
 ];
 const REALTIME_ACTIVE_POLL_MS = 4000;
 const REALTIME_IDLE_POLL_MS = 30000;
@@ -1137,9 +1139,9 @@ function renderHistoryChart(payload, { containerId, statusId, mode }) {
       <line x1="${margin.left}" y1="${margin.top + pricePlotHeight}" x2="${width - margin.right}" y2="${margin.top + pricePlotHeight}" stroke="rgba(48,54,61,0.6)" />
       <line x1="${margin.left}" y1="${margin.top + pricePlotHeight + 12}" x2="${width - margin.right}" y2="${margin.top + pricePlotHeight + 12}" stroke="rgba(48,54,61,0.4)" />
       ${volumeBars}
-      ${mode === "candles" ? candles : mode === "chip" ? renderChipDistributionSVG(bars, { width, height, margin, plotWidth, plotHeight, pricePlotHeight, volumeHeight, maxHigh, minLow, priceRange, candleWidth, step }) : mode === "tpo" ? renderTPOChartSVG(bars, { width, height, margin, plotWidth, plotHeight, pricePlotHeight, volumeHeight, maxHigh, minLow, priceRange, candleWidth, step }) : `<path d="${linePath}" fill="none" stroke="#f08a24" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />`}
-      ${mode !== "tpo" && maPath(ma5, '#f0883e')}
-      ${mode !== "tpo" && maPath(ma10, '#58a6ff')}
+      ${mode === "candles" ? candles : mode === "chip" ? renderChipDistributionSVG(bars, { width, height, margin, plotWidth, plotHeight, pricePlotHeight, volumeHeight, maxHigh, minLow, priceRange, candleWidth, step }) : mode === "tpo" ? renderTPOChartSVG(bars, { width, height, margin, plotWidth, plotHeight, pricePlotHeight, volumeHeight, maxHigh, minLow, priceRange, candleWidth, step }) : mode === "moneyflow" ? renderMoneyFlowSVG(bars, { width, height, margin, plotWidth, plotHeight, pricePlotHeight, volumeHeight, step }) : mode === "footprint" ? renderFootprintSVG(bars, { width, height, margin, plotWidth, plotHeight, pricePlotHeight, volumeHeight, maxHigh, minLow, priceRange, candleWidth, step }) : `<path d="${linePath}" fill="none" stroke="#f08a24" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />`}
+      ${mode !== "tpo" && mode !== "moneyflow" && mode !== "footprint" && maPath(ma5, '#f0883e')}
+      ${mode !== "tpo" && mode !== "moneyflow" && mode !== "footprint" && maPath(ma10, '#58a6ff')}
       ${maPath(ma20, '#d2a8ff')}
       <text x="${margin.left}" y="${height - 10}" fill="#7d8590" font-size="12">${bars[0].trade_date}</text>
       <text x="${width - margin.right - 74}" y="${height - 10}" fill="#7d8590" font-size="12">${bars[bars.length - 1].trade_date}</text>
@@ -1511,6 +1513,238 @@ function renderTPOChartSVG(bars, { width, height, margin, plotWidth, plotHeight,
     <!-- VA zone brackets -->
     <text x="${left + priceAxisWidth + 2}" y="${top + 10}" fill="#f0883e" font-size="9">VA${vaTarget > 0 ? Math.round(vaTarget / totalTPO * 100) : 70}%</text>
   `;
+}
+
+/* ── Money Flow Chart (资金流向图) ─────────────────────────────── */
+
+function renderMoneyFlowSVG(bars, { width, height, margin, plotWidth, plotHeight, pricePlotHeight, volumeHeight, step }) {
+  if (!bars || bars.length === 0) return "";
+
+  // Money flow: price change direction × volume
+  // Positive money flow = buy pressure (price up), Negative = sell pressure (price down)
+  const mfBars = bars.map((bar, i) => {
+    const change = i === 0 ? 0 : bar.close - bar.open;
+    const mf = change >= 0 ? bar.volume * change : -bar.volume * Math.abs(change);
+    return { ...bar, moneyFlow: mf, isPositive: change >= 0 };
+  });
+
+  const cumulativeMF = [];
+  let cum = 0;
+  for (const b of mfBars) {
+    cum += b.moneyFlow;
+    cumulativeMF.push(cum);
+  }
+
+  const maxMF = Math.max(...cumulativeMF.map(Math.abs), 1);
+  const mfPlotHeight = pricePlotHeight;
+  const mfTop = margin.top;
+  const left = margin.left;
+  const right = margin.right;
+
+  // Draw cumulative money flow as area chart
+  const mfStep = plotWidth / Math.max(mfBars.length - 1, 1);
+  const mfY = (v) => mfTop + mfPlotHeight / 2 - (v / maxMF) * (mfPlotHeight / 2);
+
+  let mfPath = "";
+  for (let i = 0; i < cumulativeMF.length; i++) {
+    const x = left + i * mfStep;
+    const y = mfY(cumulativeMF[i]);
+    mfPath += `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
+  }
+
+  // Close the area path
+  const lastX = left + (cumulativeMF.length - 1) * mfStep;
+  const midY = mfTop + mfPlotHeight / 2;
+  mfPath += ` L ${lastX.toFixed(1)} ${(mfTop + mfPlotHeight).toFixed(1)} L ${left.toFixed(1)} ${(mfTop + mfPlotHeight).toFixed(1)} Z`;
+
+  // Color based on overall direction
+  const lastMF = cumulativeMF[cumulativeMF.length - 1];
+  const mfColor = lastMF >= 0 ? "rgba(63,185,80,0.25)" : "rgba(248,81,73,0.25)";
+
+  // Bar representation of money flow at each period (inflow/outflow)
+  let barRects = "";
+  let netInflow = 0;
+  let netOutflow = 0;
+  for (let i = 0; i < mfBars.length; i++) {
+    const bar = mfBars[i];
+    const x = left + i * mfStep;
+    const barH = Math.max(Math.abs(bar.moneyFlow) / maxMF * (mfPlotHeight / 2), 1);
+    const y = bar.isPositive ? mfY(0) - barH : mfY(0);
+    const color = bar.isPositive ? "rgba(63,185,80,0.5)" : "rgba(248,81,73,0.5)";
+    barRects += `<rect x="${x - mfStep * 0.35}" y="${y}" width="${Math.max(mfStep * 0.7, 1.5)}" height="${barH}" fill="${color}" rx="1" />`;
+    if (bar.isPositive) netInflow += bar.moneyFlow;
+    else netOutflow += Math.abs(bar.moneyFlow);
+  }
+
+  // Zero line
+  const zeroY = mfY(0);
+
+  // Net flow annotations
+  const netFlowLabel = netInflow - netOutflow;
+  const netFlowColor = netFlowLabel >= 0 ? "#3fb950" : "#f85149";
+
+  return `
+    <defs>
+      <linearGradient id="mfGradient" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="${lastMF >= 0 ? '#3fb950' : '#f85149'}" stop-opacity="0.4"/>
+        <stop offset="100%" stop-color="${lastMF >= 0 ? '#3fb950' : '#f85149'}" stop-opacity="0.05"/>
+      </linearGradient>
+    </defs>
+    <!-- Grid lines -->
+    <line x1="${left}" y1="${mfTop}" x2="${left}" y2="${mfTop + mfPlotHeight}" stroke="rgba(48,54,61,0.3)" />
+    <line x1="${left}" y1="${zeroY}" x2="${width - right}" y2="${zeroY}" stroke="rgba(48,54,61,0.6)" />
+    <line x1="${left}" y1="${mfTop + mfPlotHeight}" x2="${width - right}" y2="${mfTop + mfPlotHeight}" stroke="rgba(48,54,61,0.3)" />
+    <!-- Zero label -->
+    <text x="${width - right + 3}" y="${zeroY + 4}" fill="#7d8590" font-size="10">0</text>
+    <!-- Money flow bars -->
+    ${barRects}
+    <!-- Cumulative line -->
+    <path d="${mfPath}" fill="url(#mfGradient)" />
+    <polyline points="${mfPath.replace(/ L /g, ' ').split(' ').filter((_, i) => i % 2 === 1 || i === 0).map((v, i, arr) => i === 0 ? v : (i % 2 === 1 ? v : '')).join(' ')}" fill="none" stroke="${lastMF >= 0 ? '#3fb950' : '#f85149'}" stroke-width="1.5" opacity="0.7" />
+    <!-- Summary -->
+    <rect x="${left}" y="${mfTop + mfPlotHeight + 8}" width="${plotWidth}" height="22" fill="rgba(255,255,255,0.03)" rx="4" />
+    <text x="${left + 8}" y="${mfTop + mfPlotHeight + 22}" fill="${netFlowColor}" font-size="12" font-weight="600">净流入 ${netFlowLabel >= 0 ? '+' : ''}${formatLargeNumber(netFlowLabel)}</text>
+    <text x="${left + plotWidth * 0.35}" y="${mfTop + mfPlotHeight + 22}" fill="#3fb950" font-size="11">流入 ${formatLargeNumber(netInflow)}</text>
+    <text x="${left + plotWidth * 0.65}" y="${mfTop + mfPlotHeight + 22}" fill="#f85149" font-size="11">流出 ${formatLargeNumber(netOutflow)}</text>
+  `;
+}
+
+/* ── Footprint Chart (订单流图 CHART-06) ─────────────────────────────── */
+
+function renderFootprintSVG(bars, { width, height, margin, plotWidth, plotHeight, pricePlotHeight, volumeHeight, maxHigh, minLow, priceRange, candleWidth, step }) {
+  /***
+   * Footprint chart (订单流图 / Market Delta) showing bid/ask volume at each price level.
+   *
+   * Without real order-book data we simulate delta from OHLCV using a realistic
+   * distribution model:
+   *   - If close > open  → more buying (60-80% buy volume)
+   *   - If close < open  → more selling (60-80% sell volume)
+   *   - If close ≈ open  → balanced (45-55% buy volume)
+   *
+   * Each bar's price range is split into discrete price levels. Volume is
+   * distributed across levels using a normal-like bell curve centred on the close.
+   */
+  if (!bars || bars.length === 0) return "";
+
+  const fpLeft = margin.left;              // footprint panel on the left
+  const bidCenter = fpLeft + 80;           // bid volume column centre
+  const askCenter = fpLeft + 160;          // ask volume column centre
+  const priceLevelWidth = 70;             // width of each price level column
+  const fpPanelWidth = 260;               // total footprint panel width
+  const tickSize = Math.max(0.01, (maxHigh - minLow) / priceRange * 0.01);
+
+  // Group bars into footprint columns: 1 column per N bars
+  const barsPerCol = Math.max(1, Math.ceil(bars.length / 30));
+  const columns: Array<{
+    priceLevels: Array<{price: number, bidVol: number, askVol: number, delta: number}>,
+    avgDelta: number, netDelta: number, buyPct: number
+  }> = [];
+
+  for (let i = 0; i < bars.length; i += barsPerCol) {
+    const slice = bars.slice(i, i + barsPerCol);
+    const priceLevels: Array<{price: number, bidVol: number, askVol: number, delta: number}> = [];
+
+    // Find price range for this group
+    const groupHigh = Math.max(...slice.map(b => b.high));
+    const groupLow = Math.min(...slice.map(b => b.low));
+    const priceSpan = Math.max(groupHigh - groupLow, tickSize);
+    const numLevels = Math.min(12, Math.max(6, Math.ceil(priceSpan / tickSize)));
+    const levelStep = priceSpan / numLevels;
+
+    for (let l = 0; l < numLevels; l++) {
+      const levelPrice = groupLow + (l + 0.5) * levelStep;
+      // Distribute volume by distance from close (bell curve centred on close)
+      let bidVol = 0, askVol = 0;
+      for (const bar of slice) {
+        const totalVol = bar.volume || 1;
+        const dist = Math.abs(levelPrice - bar.close) / Math.max(priceSpan, 1);
+        const weight = Math.exp(-2 * dist * dist); // normal-like weight
+
+        if (bar.close > bar.open) {
+          const buyPct = 0.60 + 0.20 * (1 - dist); // 60-80% buying near close
+          bidVol += totalVol * buyPct * weight / numLevels;
+          askVol += totalVol * (1 - buyPct) * weight / numLevels;
+        } else if (bar.close < bar.open) {
+          const sellPct = 0.60 + 0.20 * (1 - dist);
+          askVol += totalVol * sellPct * weight / numLevels;
+          bidVol += totalVol * (1 - sellPct) * weight / numLevels;
+        } else {
+          const buyPct = 0.48 + 0.04 * (1 - dist);
+          bidVol += totalVol * buyPct * weight / numLevels;
+          askVol += totalVol * (1 - buyPct) * weight / numLevels;
+        }
+      }
+      const delta = bidVol - askVol;
+      priceLevels.push({ price: levelPrice, bidVol, askVol, delta });
+    }
+
+    const totalBid = priceLevels.reduce((s, p) => s + p.bidVol, 0);
+    const totalAsk = priceLevels.reduce((s, p) => s + p.askVol, 0);
+    const totalVol = totalBid + totalAsk;
+    columns.push({
+      priceLevels,
+      avgDelta: totalBid - totalAsk,
+      netDelta: totalBid - totalAsk,
+      buyPct: totalVol > 0 ? totalBid / totalVol : 0.5,
+    });
+  }
+
+  // Determine column positions
+  const colWidth = Math.min(14, Math.max(6, (width - margin.left - margin.right - fpPanelWidth - 10) / columns.length));
+  const chartStartX = fpLeft + fpPanelWidth + 10;
+
+  let svgParts: string[] = [];
+  // Footprint panel background
+  svgParts.push(`<rect x="${fpLeft}" y="${margin.top}" width="${fpPanelWidth}" height="${pricePlotHeight}" fill="#0d1117" opacity="0.95" />`);
+  svgParts.push(`<text x="${fpLeft + fpPanelWidth / 2}" y="${margin.top + 14}" text-anchor="middle" fill="#8b949e" font-size="10" font-family="monospace">订单流</text>`);
+
+  // Price grid lines (dashed, same as main chart)
+  const gridColor = "rgba(48,54,61,0.6)";
+  svgParts.push(`<line x1="${chartStartX}" y1="${margin.top}" x2="${chartStartX}" y2="${margin.top + pricePlotHeight}" stroke="${gridColor}" stroke-dasharray="4,4" />`);
+
+  const maxLevelVol = Math.max(...columns.flatMap(c => c.priceLevels.map(p => Math.max(p.bidVol, p.askVol))), 1);
+  const volScale = (pricePlotHeight - 20) / maxLevelVol;
+
+  // Render each footprint column
+  columns.forEach((col, ci) => {
+    const cx = chartStartX + ci * colWidth;
+    const colColor = col.buyPct > 0.52 ? "#1a7f37" : col.buyPct < 0.48 ? "#cf222e" : "#6e7681";
+
+    col.priceLevels.forEach((level, li) => {
+      const levelY = margin.top + (li / col.priceLevels.length) * (pricePlotHeight - 20);
+      const bidH = Math.max(1, level.bidVol * volScale);
+      const askH = Math.max(1, level.askVol * volScale);
+
+      // Bid bar (left of center)
+      const bidX = cx + 1;
+      svgParts.push(`<rect x="${bidX}" y="${levelY + (pricePlotHeight - 20) / col.priceLevels.length - bidH}" width="${colWidth / 2 - 2}" height="${bidH}" fill="#1a7f37" opacity="0.75" />`);
+      // Ask bar (right of center)
+      svgParts.push(`<rect x="${bidX + colWidth / 2 - 1}" y="${levelY + (pricePlotHeight - 20) / col.priceLevels.length - askH}" width="${colWidth / 2 - 2}" height="${askH}" fill="#cf222e" opacity="0.75" />`);
+    });
+
+    // Delta badge at bottom of column
+    const deltaY = margin.top + pricePlotHeight - 8;
+    const deltaSign = col.netDelta >= 0 ? "+" : "";
+    svgParts.push(`<text x="${cx + colWidth / 2}" y="${deltaY}" text-anchor="middle" fill="${colColor}" font-size="8" font-family="monospace">${deltaSign}${col.netDelta.toFixed(0)}</text>`);
+
+    // Column border
+    svgParts.push(`<line x1="${cx}" y1="${margin.top}" x2="${cx}" y2="${margin.top + pricePlotHeight}" stroke="rgba(48,54,61,0.3)" stroke-width="0.5" />`);
+  });
+
+  // Footprint column labels (price at centre of each column group)
+  columns.forEach((col, ci) => {
+    const cx = chartStartX + ci * colWidth;
+    const midPrice = col.priceLevels[Math.floor(col.priceLevels.length / 2)]?.price || 0;
+    svgParts.push(`<text x="${cx + colWidth / 2}" y="${margin.top + pricePlotHeight + 14}" text-anchor="middle" fill="#484f58" font-size="8" font-family="monospace">${midPrice.toFixed(2)}</text>`);
+  });
+
+  // Legend
+  const legY = margin.top + pricePlotHeight + 28;
+  svgParts.push(`<rect x="${fpLeft + 10}" y="${legY}" width="10" height="8" fill="#1a7f37" opacity="0.8" /><text x="${fpLeft + 24}" y="${legY + 8}" fill="#8b949e" font-size="9" font-family="monospace">买入量</text>`);
+  svgParts.push(`<rect x="${fpLeft + 90}" y="${legY}" width="10" height="8" fill="#cf222e" opacity="0.8" /><text x="${fpLeft + 104}" y="${legY + 8}" fill="#8b949e" font-size="9" font-family="monospace">卖出量</text>`);
+  svgParts.push(`<text x="${fpLeft + 190}" y="${legY + 8}" fill="#6e7681" font-size="9" font-family="monospace">delta=净买</text>`);
+
+  return svgParts.join("");
 }
 
 /* ── Indicator panels: MACD / KDJ / BOLL (CHART-02) ─────────────── */
@@ -2013,19 +2247,25 @@ async function loadFuturesPositions() {
 function renderFuturesTradingDashboard(data) {
   var container = document.getElementById("futures-trading-dashboard");
   if (!container) return;
+  var marginRatio = data.margin_ratio || 0;
+  var risk = data.margin_risk || {};
+  var riskLevel = risk.level || "safe";
+  var riskClass = riskLevel === "liquidation" ? "risk-liquidation" : riskLevel === "danger" ? "risk-danger" : riskLevel === "warning" ? "risk-warning" : "risk-safe";
+  var riskLabel = riskLevel === "liquidation" ? "⚠ 强平风险" : riskLevel === "danger" ? "危险" : riskLevel === "warning" ? "警告" : "正常";
   var cards = [
     { title: "账户权益", value: formatNumber(data.current_equity), note: "初始 " + formatNumber(data.initial_equity) },
     { title: "可用资金", value: formatNumber(data.cash_available), note: "保证金占用 " + formatNumber(data.margin_used) },
     { title: "持仓盈亏", value: formatNumber(data.daily_pnl), note: "已实现 " + formatNumber(data.total_realized_pnl) },
-    { title: "持仓数量", value: String(data.position_count), note: "合约数" },
+    { title: "风险度", value: (marginRatio * 100).toFixed(1) + "%", note: riskLabel, noteClass: riskClass },
   ];
   container.innerHTML = cards.map(function (c) {
     var isPos = c.title === "持仓盈亏" && parseFloat(c.value) >= 0;
     var isNeg = c.title === "持仓盈亏" && parseFloat(c.value) < 0;
-    return '<div class="pulse-card"><h3>' + c.title + '</h3><strong' + (isPos ? ' class="metric-positive"' : isNeg ? ' class="metric-negative"' : '') + '>' + c.value + '</strong><p>' + c.note + '</p></div>';
+    var noteClassAttr = c.noteClass ? ' class="note-' + c.noteClass + '"' : '';
+    return '<div class="pulse-card"><h3>' + c.title + '</h3><strong' + (isPos ? ' class="metric-positive"' : isNeg ? ' class="metric-negative"' : '') + '>' + c.value + '</strong><p' + noteClassAttr + '>' + c.note + '</p></div>';
   }).join("");
   var summary = document.getElementById("futures-trading-summary");
-  if (summary) summary.textContent = "账户 " + data.account_code + " · 持仓 " + data.position_count + " 个合约";
+  if (summary) summary.textContent = "账户 " + data.account_code + " · 持仓 " + data.position_count + " 个合约 · 风险度 " + (marginRatio * 100).toFixed(1) + "% · " + (risk.message || "");
 }
 
 function renderFuturesPositions(data) {
@@ -3073,6 +3313,7 @@ function renderMarketPulse() {
     .join("");
   renderSectorHeatmap();
   renderSentimentPanel();
+  renderDragonTigerPanel();
 }
 
 function renderSectorHeatmap() {
@@ -3141,6 +3382,53 @@ function renderSentimentPanel() {
       latestEl.textContent = docs.length > 0 ? docs[0].title || "最新情报" : "暂无最新情报";
     }
   }).catch(function () {});
+}
+
+function renderDragonTigerPanel() {
+  var container = document.getElementById("dragon-tiger-list");
+  var summaryEl = document.getElementById("dragon-tiger-summary");
+  if (!container) return;
+  var stocks = state.universe;
+  if (!stocks.length) {
+    container.innerHTML = '<div class="empty-state">加载股票数据后显示龙虎榜</div>';
+    return;
+  }
+  // Score stocks by unusual activity: volume, price change, turnover
+  var scored = stocks.map(function (s) {
+    var volRatio = s.volume && s.turnover ? s.volume / Math.max(s.turnover / (s.last_price || 1), 1) : 0;
+    var changeScore = Math.abs(s.change_pct || 0);
+    var volScore = Math.log1p(s.volume || 0);
+    return { stock: s, score: volRatio * 0.4 + changeScore * 0.3 + volScore * 0.3, volRatio: volRatio };
+  });
+  scored.sort(function (a, b) { return b.score - a.score; });
+  var top = scored.slice(0, 9);
+  var totalBuyVol = top.filter(function (t) { return t.stock.change_pct > 0; }).reduce(function (s, t) { return s + (t.stock.volume || 0); }, 0);
+  var totalSellVol = top.filter(function (t) { return t.stock.change_pct < 0; }).reduce(function (s, t) { return s + (t.stock.volume || 0); }, 0);
+  if (summaryEl) {
+    var netDirection = totalBuyVol > totalSellVol ? "偏多" : totalSellVol > totalBuyVol ? "偏空" : "中性";
+    summaryEl.textContent = "Top 9 大单异动 · 合计净流入 " + formatLargeNumber(totalBuyVol - totalSellVol) + " 股 · 整体情绪 " + netDirection;
+  }
+  container.innerHTML = top.map(function (t) {
+    var s = t.stock;
+    var type = s.change_pct > 3 ? "buy" : s.change_pct < -3 ? "sell" : "active";
+    var label = s.change_pct > 3 ? "大单买入" : s.change_pct < -3 ? "大单卖出" : "异动";
+    return '<div class="dragon-tiger-card ' + type + '" data-instrument-id="' + s.instrument_id + '">' +
+      '<div class="dragon-tiger-card-header">' +
+        '<span class="dragon-tiger-symbol">' + s.symbol + '</span>' +
+        '<span class="dragon-tiger-badge ' + type + '">' + label + '</span>' +
+      '</div>' +
+      '<div class="dragon-tiger-metric"><strong>' + formatNumber(s.change_pct) + '%</strong> 涨跌</div>' +
+      '<div class="dragon-tiger-metric"><strong>' + formatLargeNumber(s.volume) + '</strong> 成交量</div>' +
+      '<div class="dragon-tiger-metric"><strong>' + formatNumber(s.turnover) + '</strong> 成交额</div>' +
+    '</div>';
+  }).join("");
+  container.querySelectorAll(".dragon-tiger-card").forEach(function (card) {
+    card.style.cursor = "pointer";
+    card.addEventListener("click", function () {
+      var iid = card.dataset.instrumentId;
+      if (iid) openResearchTab(iid);
+    });
+  });
 }
 
 function renderRiskDashboard() {
@@ -4793,6 +5081,11 @@ document.addEventListener("click", async (event) => {
     loadFuturesTrading();
     return;
   }
+  var dragonTigerRefresh = event.target.closest("#dragon-tiger-refresh");
+  if (dragonTigerRefresh) {
+    renderDragonTigerPanel();
+    return;
+  }
 
   /* F10 sub-tab clicks */
   const subTabBtn = event.target.closest("[data-subtab]");
@@ -5149,6 +5442,62 @@ window.addEventListener("DOMContentLoaded", async () => {
   scheduleRealtimePolling();
   scheduleDownloadPolling();
   initSSE();
+  // MOB-01~05: Register service worker for PWA offline support
+  if ("serviceWorker" in navigator) {
+    try {
+      const reg = await navigator.serviceWorker.register("/service-worker.js");
+      reg.addEventListener("updatefound", () => {
+        const worker = reg.installing;
+        worker.addEventListener("statechange", () => {
+          if (worker.state === "installed" && navigator.serviceWorker.controller) {
+            showPWAUpdateBanner();
+          }
+        });
+      });
+    } catch (e) {
+      console.warn("SW registration failed:", e);
+    }
+  }
+
+  // MOB-01~05: Capture install prompt event for PWA installability
+  let installPromptEvent = null;
+  window.addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault();
+    installPromptEvent = e;
+    showInstallPrompt();
+  });
+
+  window.showInstallPrompt = function () {
+    const existing = document.getElementById("pwa-install-banner");
+    if (existing) return;
+    const banner = document.createElement("div");
+    banner.id = "pwa-install-banner";
+    banner.className = "pwa-install-banner";
+    banner.innerHTML = `<div class="pwa-install-inner"><div class="pwa-install-text"><strong>安装 Quant Exchange App</strong><span>离线访问，添加到主屏幕</span></div><div class="pwa-install-actions"><button id="pwa-install-btn" class="primary-button" type="button">安装</button><button id="pwa-dismiss-btn" class="ghost-button" type="button">稍后</button></div></div>`;
+    document.body.appendChild(banner);
+    banner.querySelector("#pwa-install-btn").addEventListener("click", async () => {
+      if (!installPromptEvent) return;
+      installPromptEvent.prompt();
+      const { outcome } = await installPromptEvent.userChoice;
+      installPromptEvent = null;
+      banner.remove();
+    });
+    banner.querySelector("#pwa-dismiss-btn").addEventListener("click", () => {
+      installPromptEvent = null;
+      banner.remove();
+    });
+  };
+
+  function showPWAUpdateBanner() {
+    const existing = document.getElementById("pwa-update-banner");
+    if (existing) return;
+    const banner = document.createElement("div");
+    banner.id = "pwa-update-banner";
+    banner.className = "pwa-install-banner pwa-update-banner";
+    banner.innerHTML = `<div class="pwa-install-inner"><div class="pwa-install-text"><strong>App 已更新</strong><span>点击刷新以获取最新版本</span></div><button id="pwa-refresh-btn" class="primary-button" type="button">刷新</button></div>`;
+    document.body.appendChild(banner);
+    banner.querySelector("#pwa-refresh-btn").addEventListener("click", () => window.location.reload());
+  }
   await logEvent("open_page", { path: window.location.pathname });
   await loadActivity();
 });

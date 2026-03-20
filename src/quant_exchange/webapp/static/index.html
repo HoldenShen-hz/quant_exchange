@@ -2,8 +2,12 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Quant Exchange Terminal</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#0a0e1a" />
+    <meta name="description" content="全球交易研究终端 - A股、港股、美股、加密货币、期货" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%230a0e1a' rx='4'/><path d='M6 24 L11 15 L16 18 L21 10 L26 13' stroke='%2358a6ff' stroke-width='2' fill='none' stroke-linecap='round'/></svg>" />
+    <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'><rect width='180' height='180' fill='%230a0e1a' rx='22'/><path d='M35 135 L65 85 L95 105 L125 55 L155 75' stroke='%2358a6ff' stroke-width='11' fill='none' stroke-linecap='round' stroke-linejoin='round'/><circle cx='155' cy='75' r='9' fill='%23f0883e'/></svg>" />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
@@ -169,6 +173,19 @@
                 <strong id="intel-count">0</strong>
                 <p id="intel-latest">暂无最新情报</p>
               </div>
+            </div>
+          </section>
+
+          <!-- 龙虎榜: Top traders / institutional activity -->
+          <section class="panel">
+            <div class="section-head">
+              <h2>龙虎榜</h2>
+              <p>大单异动、机构席位和涨跌异动股票</p>
+              <button id="dragon-tiger-refresh" class="ghost-button" type="button">刷新</button>
+            </div>
+            <div id="dragon-tiger-panel">
+              <div class="dragon-tiger-summary" id="dragon-tiger-summary">加载中...</div>
+              <div class="dragon-tiger-grid" id="dragon-tiger-list"></div>
             </div>
           </section>
 

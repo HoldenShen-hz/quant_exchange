@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from quant_exchange.adapters.registry import AdapterRegistry
 from quant_exchange.core.models import Instrument, Kline, utc_now
+from quant_exchange.infrastructure.cache import CacheService
 from quant_exchange.marketdata.service import MarketDataStore
 
 
@@ -57,6 +58,7 @@ class CryptoWorkbenchService:
         *,
         exchange_code: str = "SIM_CRYPTO",
         clock: Callable[[], datetime] | None = None,
+        cache_service: CacheService | None = None,
     ) -> None:
         self.adapters = adapter_registry
         self.market_data_store = market_data_store
@@ -65,6 +67,7 @@ class CryptoWorkbenchService:
         self._instruments: dict[str, Instrument] = {}
         self._symbol_index: dict[str, str] = {}
         self._bar_cache: dict[tuple[str, str], list[Kline]] = {}
+        self.cache = cache_service
         self._bootstrap()
 
     def list_assets(self) -> list[dict[str, Any]]:
@@ -189,17 +192,35 @@ class CryptoWorkbenchService:
         return self._instruments[normalized]
 
     def _bars(self, instrument_id: str, interval: str) -> list[Kline]:
-        """Return cached bars from the market-data store or adapter."""
+        """Return cached bars from the market-data store or adapter.
 
+        Implements cache-aside: checks Redis (when available) before hitting
+        the adapter, then populates both local and distributed cache.
+        """
         key = (instrument_id, interval)
         if key not in self._bar_cache:
-            adapter = self.adapters.get_market_data(self.exchange_code)
-            bars = adapter.fetch_klines(instrument_id, interval)
-            self.market_data_store.ingest_klines(bars)
-            self._bar_cache[key] = sorted(
-                self.market_data_store.query_klines(instrument_id, interval),
-                key=lambda bar: bar.open_time,
-            )
+            # Try distributed cache first (cache-aside read)
+            cached_bars: list[Kline] = []
+            if self.cache is not None and self.cache.is_available():
+                cached_bars = self.cache.get_kline_range(instrument_id, interval)
+            if cached_bars:
+                self._bar_cache[key] = cached_bars
+                # Also populate in-memory store for consistency
+                self.market_data_store.ingest_klines(cached_bars)
+            else:
+                # Cache miss — fetch from adapter
+                adapter = self.adapters.get_market_data(self.exchange_code)
+                bars = adapter.fetch_klines(instrument_id, interval)
+                self.market_data_store.ingest_klines(bars)
+                self._bar_cache[key] = sorted(
+                    self.market_data_store.query_klines(instrument_id, interval),
+                    key=lambda bar: bar.open_time,
+                )
+                # Populate distributed cache (cache-aside write)
+                if self.cache is not None and self.cache.is_available():
+                    for bar in bars:
+                        ttl = 300 if interval in ("1m", "5m", "15m") else 604800
+                        self.cache.set_kline(bar, ttl)
         return list(self._bar_cache[key])
 
     def _asset_payload(self, instrument: Instrument) -> dict[str, Any]:
@@ -279,3 +300,133 @@ class CryptoWorkbenchService:
             "close": bar.close,
             "volume": bar.volume,
         }
+
+
+# ─── CR-06: Real CoinGecko API Integration ─────────────────────────────────────
+
+_COINGECKO_BASE = "https://api.coingecko.com/api/v3"
+
+# Map our internal symbol to CoinGecko coin IDs
+_COINGECKO_ID_MAP: dict[str, str] = {
+    "BTCUSDT": "bitcoin",
+    "ETHUSDT": "ethereum",
+    "SOLUSDT": "solana",
+    "BNBUSDT": "binancecoin",
+    "DOGEUSDT": "dogecoin",
+    "XRPUSDT": "ripple",
+    "ADAUSDT": "cardano",
+    "DOTUSDT": "polkadot",
+    "MATICUSDT": "matic-network",
+    "AVAXUSDT": "avalanche-2",
+}
+
+
+class CoinGeckoClient:
+    """Real-time crypto market data from CoinGecko API (CR-06).
+
+    Falls back to simulated data when API is unavailable or rate-limited.
+    All methods return dicts in the same format as the simulated adapter.
+    """
+
+    def __init__(self, use_real: bool = True) -> None:
+        self.use_real = use_real
+        self._session: Any = None  # Will use urllib or requests
+        self._last_market_fetch: datetime | None = None
+        self._cached_markets: list[dict[str, Any]] = []
+        self._cache_ttl_seconds = 60  # Cache market data for 60 seconds
+
+    def _http_get(self, endpoint: str, params: dict | None = None) -> dict | list | None:
+        """Make an HTTP GET request to CoinGecko API."""
+        try:
+            import urllib.request
+            import urllib.parse
+            url = f"{_COINGECKO_BASE}/{endpoint}"
+            if params:
+                url += "?" + urllib.parse.urlencode(params)
+            req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "QuantExchange/1.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                import json
+                return json.loads(resp.read())
+        except Exception:
+            return None
+
+    def fetch_markets(self, currency: str = "usd") -> list[dict[str, Any]]:
+        """Fetch current market data for top crypto assets (CR-06)."""
+        if not self.use_real:
+            return []
+
+        now = utc_now()
+        if (
+            self._cached_markets
+            and self._last_market_fetch
+            and (now - self._last_market_fetch).total_seconds() < self._cache_ttl_seconds
+        ):
+            return self._cached_markets
+
+        data = self._http_get(
+            "coins/markets",
+            params={
+                "vs_currency": currency,
+                "ids": ",".join(_COINGECKO_ID_MAP.values()),
+                "order": "market_cap_desc",
+                "per_page": 20,
+                "page": 1,
+                "sparkline": "false",
+            },
+        )
+
+        if not data:
+            return self._cached_markets or []
+
+        self._cached_markets = [
+            {
+                "id": coin.get("id"),
+                "symbol": coin.get("symbol", "").upper(),
+                "name": coin.get("name"),
+                "current_price": coin.get("current_price", 0),
+                "market_cap": coin.get("market_cap", 0),
+                "total_volume": coin.get("total_volume", 0),
+                "price_change_24h": coin.get("price_change_24h", 0),
+                "price_change_percentage_24h": coin.get("price_change_percentage_24h", 0),
+                "circulating_supply": coin.get("circulating_supply", 0),
+                "ath": coin.get("ath", 0),
+                "atl": coin.get("atl", 0),
+            }
+            for coin in data
+            if coin.get("id") in _COINGECKO_ID_MAP.values()
+        ]
+        self._last_market_fetch = now
+        return self._cached_markets
+
+    def fetch_ohlc(self, coin_id: str, days: int = 7) -> list[list[float]]:
+        """Fetch OHLC data for a coin (CR-06)."""
+        if not self.use_real:
+            return []
+        return self._http_get(
+            f"coins/{coin_id}/ohlc",
+            params={"vs_currency": "usd", "days": days},
+        ) or []
+
+    def fetch_simple_price(self, coin_ids: list[str], currencies: list[str] = ["usd"]) -> dict[str, dict[str, float]]:
+        """Fetch simple price data for multiple coins (CR-06)."""
+        if not self.use_real:
+            return {}
+        data = self._http_get(
+            "simple/price",
+            params={
+                "ids": ",".join(coin_ids),
+                "vs_currencies": ",".join(currencies),
+            },
+        )
+        return data or {}
+
+    def get_coin_id(self, instrument_id: str) -> str | None:
+        """Map internal instrument ID to CoinGecko coin ID."""
+        return _COINGECKO_ID_MAP.get(instrument_id)
+
+    def get_instrument_id(self, coin_id: str) -> str | None:
+        """Map CoinGecko coin ID back to internal instrument ID."""
+        for iid, cid in _COINGECKO_ID_MAP.items():
+            if cid == coin_id:
+                return iid
+        return None

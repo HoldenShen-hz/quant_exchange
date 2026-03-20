@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from quant_exchange.core.models import Direction, DirectionalBias, Instrument, Kline, Position
+from quant_exchange.core.models import Alert, AlertSeverity, Direction, DirectionalBias, Instrument, Kline, Position, utc_now
 from quant_exchange.strategy import MovingAverageSentimentStrategy, StrategyContext
 
 
@@ -33,9 +33,10 @@ class StrategyTemplate:
 class StrategyBotService:
     """Manage strategy bots, bot interactions, and operator notifications."""
 
-    def __init__(self, persistence=None, stock_directory=None) -> None:
+    def __init__(self, persistence=None, stock_directory=None, notification_service=None) -> None:
         self.persistence = persistence
         self.stock_directory = stock_directory
+        self.notification_service = notification_service
         self.templates = self._build_templates()
 
     def list_templates(self) -> list[dict]:
@@ -411,10 +412,8 @@ class StrategyBotService:
         )
 
     def _emit_notification(self, *, bot_id: str, level: str, event_type: str, title: str, message: str) -> None:
-        """Store a bot notification for the web console."""
+        """Store a bot notification for the web console and optionally send to monitoring channels (BOT-05)."""
 
-        if self.persistence is None:
-            return
         notification_id = f"notif:{uuid4().hex[:12]}"
         payload = {
             "notification_id": notification_id,
@@ -425,13 +424,32 @@ class StrategyBotService:
             "message": message,
             "created_at": _now(),
         }
-        self.persistence.upsert_record(
-            "ops_notifications",
-            "notification_id",
-            notification_id,
-            payload,
-            extra_columns={"bot_id": bot_id, "level": level, "event_type": event_type},
-        )
+        if self.persistence is not None:
+            self.persistence.upsert_record(
+                "ops_notifications",
+                "notification_id",
+                notification_id,
+                payload,
+                extra_columns={"bot_id": bot_id, "level": level, "event_type": event_type},
+            )
+
+        # BOT-05: Also emit through notification channels (Telegram, DingTalk, etc.)
+        if self.notification_service is not None and hasattr(self.notification_service, "notify"):
+            severity_map = {
+                "info": AlertSeverity.INFO,
+                "warning": AlertSeverity.WARNING,
+                "critical": AlertSeverity.CRITICAL,
+                "emergency": AlertSeverity.EMERGENCY,
+            }
+            severity = severity_map.get(level.lower(), AlertSeverity.INFO)
+            alert = Alert(
+                code=f"bot_{event_type}",
+                severity=severity,
+                message=f"[{title}] {message}",
+                timestamp=utc_now(),
+                context={"bot_id": bot_id, "event_type": event_type},
+            )
+            self.notification_service.notify(alert)
 
     def _build_templates(self) -> dict[str, StrategyTemplate]:
         """Build a small template library inspired by hosted quant platforms."""
