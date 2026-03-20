@@ -36,6 +36,13 @@ from quant_exchange.enhanced import (
 )
 from quant_exchange.intelligence import LLMInterpretationService
 from quant_exchange.forex import ForexService
+from quant_exchange.social import SocialService
+from quant_exchange.copy_trading import CopyTradingService
+from quant_exchange.marketplace import MarketplaceService
+from quant_exchange.visual_editor import VisualEditorService
+from quant_exchange.competitions import CompetitionService
+from quant_exchange.tax import TaxService
+from quant_exchange.collaboration import CollaborationService
 from quant_exchange.enhanced.smart_screener import SmartScreenerService
 from quant_exchange.enhanced.portfolio_allocators import (
     PortfolioAllocatorService,
@@ -135,6 +142,13 @@ class QuantTradingPlatform:
         self.multi_account_service = MultiAccountService(self.persistence)  # ACCT-01~ACCT-04: Multi-account management
         self.options = OptionsService(self.persistence)  # OPT-01~OPT-04: Options trading tools
         self.forex = ForexService(self.persistence)  # FX-01~FX-04: Forex and commodities
+        self.social = SocialService(self.persistence)  # SOC-01~SOC-06: Community and social features
+        self.copy_trading = CopyTradingService(self.persistence)  # COPY-01~COPY-06: Copy trading
+        self.marketplace = MarketplaceService(self.persistence)  # MKT-01~MKT-06: Strategy marketplace
+        self.visual_editor = VisualEditorService()  # VIS-01~VIS-05: Visual strategy editor
+        self.competitions = CompetitionService(self.persistence)  # COMP-01~COMP-04: Competition platform
+        self.tax = TaxService(self.persistence)  # TAX-01~TAX-04: Tax compliance reporting
+        self.collaboration = CollaborationService(self.persistence)  # COLLAB-01~COLLAB-04: Team collaboration
         self._register_default_adapters()
         self.crypto = CryptoWorkbenchService(self.adapters, self.market_data, cache_service=self.cache)
         self.futures = FuturesWorkbenchService(self.adapters, self.market_data)

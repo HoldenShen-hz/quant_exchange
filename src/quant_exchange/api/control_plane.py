@@ -2990,6 +2990,164 @@ class ControlPlaneAPI:
         except Exception as exc:
             return self._error("TEMPORARILY_UNAVAILABLE", f"Failed to compute risk: {exc}")
 
+    # ── SOC-01~SOC-06: Social & Community ──────────────────────────────────
+
+    def social_create_post(
+        self,
+        user_id: str,
+        post_type: str,
+        title: str,
+        content: str,
+        tags: list[str] | None = None,
+        strategy_id: str | None = None,
+    ) -> dict:
+        """Create a community post (SOC-01)."""
+        try:
+            from quant_exchange.social.service import PostType
+            pt = PostType(post_type)
+            post = self.platform.social.create_post(user_id, pt, title, content, tags, strategy_id)
+            return self._ok({"post": self._serialize(post)})
+        except Exception as exc:
+            return self._error("INVALID_REQUEST", f"Failed to create post: {exc}")
+
+    def social_list_posts(self, post_type: str | None = None, user_id: str | None = None, tag: str | None = None, limit: int = 20, offset: int = 0) -> dict:
+        """List community posts (SOC-01)."""
+        try:
+            from quant_exchange.social.service import PostType
+            pt = PostType(post_type) if post_type else None
+            posts = self.platform.social.list_posts(pt, user_id, tag, limit, offset)
+            return self._ok({"posts": [self._serialize(p) for p in posts]})
+        except Exception as exc:
+            return self._error("INVALID_REQUEST", f"Failed to list posts: {exc}")
+
+    def social_get_post(self, post_id: str) -> dict:
+        """Get a single post."""
+        try:
+            post = self.platform.social.get_post(post_id)
+            if not post:
+                return self._error("NOT_FOUND", "Post not found")
+            return self._ok({"post": self._serialize(post)})
+        except Exception as exc:
+            return self._error("INVALID_REQUEST", f"Failed to get post: {exc}")
+
+    def social_add_comment(self, post_id: str, user_id: str, content: str, parent_comment_id: str | None = None) -> dict:
+        """Add a comment to a post (SOC-01)."""
+        try:
+            comment = self.platform.social.add_comment(post_id, user_id, content, parent_comment_id)
+            if not comment:
+                return self._error("NOT_FOUND", "Post not found")
+            return self._ok({"comment": self._serialize(comment)})
+        except Exception as exc:
+            return self._error("INVALID_REQUEST", f"Failed to add comment: {exc}")
+
+    def social_list_comments(self, post_id: str) -> dict:
+        """List comments for a post."""
+        try:
+            comments = self.platform.social.list_comments(post_id)
+            return self._ok({"comments": [self._serialize(c) for c in comments]})
+        except Exception as exc:
+            return self._error("INVALID_REQUEST", f"Failed to list comments: {exc}")
+
+    def social_like(self, user_id: str, target_id: str, target_type: str) -> dict:
+        """Like a post or comment (SOC-01)."""
+        try:
+            success = self.platform.social.like(user_id, target_id, target_type)
+            return self._ok({"liked": success})
+        except Exception as exc:
+            return self._error("INVALID_REQUEST", f"Failed to like: {exc}")
+
+    def social_unlike(self, user_id: str, target_id: str) -> dict:
+        """Unlike a post or comment."""
+        try:
+            success = self.platform.social.unlike(user_id, target_id)
+            return self._ok({"unliked": success})
+        except Exception as exc:
+            return self._error("INVALID_REQUEST", f"Failed to unlike: {exc}")
+
+    def social_share_strategy(self, post_id: str, user_id: str, strategy_name: str, strategy_type: str, parameters: dict, performance_summary: dict) -> dict:
+        """Share a strategy with the community (SOC-02)."""
+        try:
+            share = self.platform.social.share_strategy(post_id, user_id, strategy_name, strategy_type, parameters, performance_summary)
+            return self._ok({"share": self._serialize(share)})
+        except Exception as exc:
+            return self._error("INVALID_REQUEST", f"Failed to share strategy: {exc}")
+
+    def social_list_strategies(self, strategy_type: str | None = None, user_id: str | None = None, sort_by: str = "usage", limit: int = 20) -> dict:
+        """List shared strategies (SOC-02)."""
+        try:
+            shares = self.platform.social.list_strategy_shares(strategy_type, user_id, sort_by, limit)
+            return self._ok({"strategies": [self._serialize(s) for s in shares]})
+        except Exception as exc:
+            return self._error("INVALID_REQUEST", f"Failed to list strategies: {exc}")
+
+    def social_copy_strategy(self, share_id: str, copying_user_id: str) -> dict:
+        """Copy a shared strategy (SOC-02)."""
+        try:
+            result = self.platform.social.copy_strategy(share_id, copying_user_id)
+            if not result:
+                return self._error("NOT_FOUND", "Strategy not found")
+            return self._ok({"copied_strategy": result})
+        except Exception as exc:
+            return self._error("INVALID_REQUEST", f"Failed to copy strategy: {exc}")
+
+    def social_get_user_profile(self, user_id: str) -> dict:
+        """Get a user profile (SOC-03)."""
+        try:
+            profile = self.platform.social.get_user_profile(user_id)
+            if not profile:
+                return self._error("NOT_FOUND", "User not found")
+            return self._ok({"profile": self._serialize(profile)})
+        except Exception as exc:
+            return self._error("INVALID_REQUEST", f"Failed to get profile: {exc}")
+
+    def social_follow(self, follower_id: str, following_id: str) -> dict:
+        """Follow a user (SOC-03)."""
+        try:
+            success = self.platform.social.follow(follower_id, following_id)
+            return self._ok({"followed": success})
+        except Exception as exc:
+            return self._error("INVALID_REQUEST", f"Failed to follow: {exc}")
+
+    def social_unfollow(self, follower_id: str, following_id: str) -> dict:
+        """Unfollow a user."""
+        try:
+            success = self.platform.social.unfollow(follower_id, following_id)
+            return self._ok({"unfollowed": success})
+        except Exception as exc:
+            return self._error("INVALID_REQUEST", f"Failed to unfollow: {exc}")
+
+    def social_get_leaderboard(self, limit: int = 20) -> dict:
+        """Get user leaderboard by points (SOC-03)."""
+        try:
+            leaders = self.platform.social.get_leaderboard(limit)
+            return self._ok({"leaderboard": [self._serialize(p) for p in leaders]})
+        except Exception as exc:
+            return self._error("INVALID_REQUEST", f"Failed to get leaderboard: {exc}")
+
+    def social_get_recommended_posts(self, user_id: str, limit: int = 20) -> dict:
+        """Get personalized post recommendations (SOC-04)."""
+        try:
+            posts = self.platform.social.get_recommended_posts(user_id, limit)
+            return self._ok({"posts": [self._serialize(p) for p in posts]})
+        except Exception as exc:
+            return self._error("INVALID_REQUEST", f"Failed to get recommendations: {exc}")
+
+    def social_get_notifications(self, user_id: str, unread_only: bool = False) -> dict:
+        """Get user notifications (SOC-05)."""
+        try:
+            notifs = self.platform.social.get_notifications(user_id, unread_only)
+            return self._ok({"notifications": [self._serialize(n) for n in notifs]})
+        except Exception as exc:
+            return self._error("INVALID_REQUEST", f"Failed to get notifications: {exc}")
+
+    def social_moderate_post(self, post_id: str, action: str) -> dict:
+        """Moderate a post (approve/reject) (SOC-06)."""
+        try:
+            success = self.platform.social.moderate_post(post_id, action)
+            return self._ok({"moderated": success})
+        except Exception as exc:
+            return self._error("INVALID_REQUEST", f"Failed to moderate post: {exc}")
+
     def _serialize(self, value: Any) -> Any:
         if is_dataclass(value):
             return asdict(value)
