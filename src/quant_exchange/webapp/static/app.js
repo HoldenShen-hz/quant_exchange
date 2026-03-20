@@ -1380,7 +1380,7 @@ function renderChipDistributionSVG(bars, { width, height, margin, plotWidth, plo
     ${currentPriceLine}
     <line x1="${left + priceAxisWidth}" y1="${top}" x2="${left + priceAxisWidth}" y2="${top + pricePlotHeight}" stroke="rgba(48,54,61,0.6)" stroke-width="1" />
     <!-- VA zone highlight -->
-    <rect x="${priceToChipX(vaHighPrice)}" y="${top}" width="${Math.abs(priceToChipX(vaLowPrice) - priceToChipX(vaHighPrice)))}" y2="${top + pricePlotHeight}" fill="rgba(240,136,62,0.06)" />
+    <rect x="${priceToChipX(vaHighPrice)}" y="${top}" width="${Math.abs(priceToChipX(vaLowPrice) - priceToChipX(vaHighPrice))}" y2="${top + pricePlotHeight}" fill="rgba(240,136,62,0.06)" />
     <text x="${width - right + 4}" y="${top + 12}" fill="#7d8590" font-size="10">85%VA</text>
   `;
 }
@@ -1635,14 +1635,11 @@ function renderFootprintSVG(bars, { width, height, margin, plotWidth, plotHeight
 
   // Group bars into footprint columns: 1 column per N bars
   const barsPerCol = Math.max(1, Math.ceil(bars.length / 30));
-  const columns: Array<{
-    priceLevels: Array<{price: number, bidVol: number, askVol: number, delta: number}>,
-    avgDelta: number, netDelta: number, buyPct: number
-  }> = [];
+  const columns = [];
 
   for (let i = 0; i < bars.length; i += barsPerCol) {
     const slice = bars.slice(i, i + barsPerCol);
-    const priceLevels: Array<{price: number, bidVol: number, askVol: number, delta: number}> = [];
+    const priceLevels = [];
 
     // Find price range for this group
     const groupHigh = Math.max(...slice.map(b => b.high));
@@ -1693,7 +1690,7 @@ function renderFootprintSVG(bars, { width, height, margin, plotWidth, plotHeight
   const colWidth = Math.min(14, Math.max(6, (width - margin.left - margin.right - fpPanelWidth - 10) / columns.length));
   const chartStartX = fpLeft + fpPanelWidth + 10;
 
-  let svgParts: string[] = [];
+  let svgParts = [];
   // Footprint panel background
   svgParts.push(`<rect x="${fpLeft}" y="${margin.top}" width="${fpPanelWidth}" height="${pricePlotHeight}" fill="#0d1117" opacity="0.95" />`);
   svgParts.push(`<text x="${fpLeft + fpPanelWidth / 2}" y="${margin.top + 14}" text-anchor="middle" fill="#8b949e" font-size="10" font-family="monospace">订单流</text>`);
@@ -5365,7 +5362,7 @@ function initSSE() {
   }
   const clientId = state.clientId || "anonymous";
   _sseSource = new EventSource(`/api/events/stream?client_id=${encodeURIComponent(clientId)}`);
-  _sseSource.onmessage = (event) => {
+  _sseSource.onmessage = async (event) => {
     try {
       const data = JSON.parse(event.data);
       if (data.type === "connected") {
