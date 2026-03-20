@@ -148,9 +148,9 @@ class _WebSocketServer:
                 if ": " in line:
                     key, val = line.split(": ", 1)
                     headers[key.lower()] = val.strip()
-            if headers.get("upgrade") != "websocket" or "websocket-key" not in headers:
+            if headers.get("upgrade") != "websocket" or "sec-websocket-key" not in headers:
                 return False
-            key = headers["websocket-key"]
+            key = headers["sec-websocket-key"]
             accept = base64.b64encode(hashlib.sha1((key + self.GUID).encode()).digest()).decode()
             response = (
                 "HTTP/1.1 101 Switching Protocols\r\n"
