@@ -1,7 +1,7 @@
 # TODO: 未完成功能清单
 
 > 基于 doc/ 全部需求文档与代码库的逐项审计，截至 2026-03-20
-> 整体完成度约 98%（本次更新：HOOK-01~HOOK-05 Webhook自动化完成）
+> 整体完成度约 99%（本次更新：ACCT-01~ACCT-04 多账户管理完成）
 
 ---
 
@@ -112,7 +112,7 @@
 
 | 编号 | 功能 | 状态 |
 |------|------|------|
-| ACCT-01~ACCT-04 | 多账户管理(子账户/统一视图) | NO |
+| ACCT-01~ACCT-04 | 多账户管理(子账户/统一视图) | YES | MultiAccountService实现完整账户注册/分组/统一视图/内部转账/跨账户风控，Platform已集成multi_account_service，ControlPlaneAPI acct_*端点完整接入，test_enhanced_new_services.py已覆盖 |
 | OPT-01~OPT-04 | 期权交易工具(Greeks/波动率曲面/策略构建) | NO |
 | FX-01~FX-04 | 外汇交易(主流货币对/数据/回测) | NO |
 | TAX-01~TAX-04 | 税务合规报告 | NO |

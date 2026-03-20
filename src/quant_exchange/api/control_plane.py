@@ -2335,6 +2335,116 @@ class ControlPlaneAPI:
             return self._error("BAD_REQUEST", "Transfer failed - check account balances")
         return self._ok(self._serialize(transfer))
 
+    # ── ACCT-01~ACCT-04: Multi-Account Management ─────────────────────────────
+
+    def acct_register_account(
+        self,
+        user_id: str,
+        account_type: str = "paper",
+        currency: str = "USD",
+        initial_balance: float = 0.0,
+    ) -> dict:
+        """Register a new trading account (ACCT-01)."""
+        try:
+            account = self.platform.multi_account_service.register_account(
+                user_id=user_id,
+                account_type=account_type,
+                currency=currency,
+                initial_balance=initial_balance,
+            )
+            return self._ok({
+                "account_id": account.account_id,
+                "user_id": account.user_id,
+                "account_type": account.account_type.value,
+                "currency": account.currency,
+                "balance": account.balance,
+                "is_active": account.is_active,
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Account registration failed: {exc}")
+
+    def acct_get_unified_view(self, user_id: str, account_ids: list[str] | None = None) -> dict:
+        """Get unified asset view across accounts (ACCT-01)."""
+        try:
+            view = self.platform.multi_account_service.get_unified_view(user_id, account_ids)
+            return self._ok({
+                "user_id": view.user_id,
+                "total_equity": view.total_equity,
+                "total_cash": view.total_cash,
+                "total_positions_value": view.total_positions_value,
+                "total_pnl": view.total_pnl,
+                "currency": view.currency,
+                "account_breakdown": view.account_breakdown,
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Failed to get unified view: {exc}")
+
+    def acct_create_group(self, user_id: str, group_name: str) -> dict:
+        """Create an account group (ACCT-03)."""
+        try:
+            group = self.platform.multi_account_service.create_group(user_id, group_name)
+            return self._ok({
+                "group_id": group.group_id,
+                "name": group.name,
+                "account_ids": list(group.account_ids),
+                "created_at": group.created_at,
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Failed to create group: {exc}")
+
+    def acct_add_to_group(self, group_id: str, account_id: str) -> dict:
+        """Add an account to a group (ACCT-03)."""
+        try:
+            added = self.platform.multi_account_service.add_account_to_group(group_id, account_id)
+            if not added:
+                return self._error("NOT_FOUND", "Group or account not found")
+            return self._ok({"group_id": group_id, "account_id": account_id, "added": True})
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Failed to add account to group: {exc}")
+
+    def acct_internal_transfer(
+        self,
+        from_account_id: str,
+        to_account_id: str,
+        amount: float,
+        currency: str = "USD",
+    ) -> dict:
+        """Execute an internal fund transfer (ACCT-02)."""
+        try:
+            transfer = self.platform.multi_account_service.transfer(
+                from_account_id=from_account_id,
+                to_account_id=to_account_id,
+                amount=amount,
+                currency=currency,
+            )
+            if not transfer:
+                return self._error("BAD_REQUEST", "Transfer failed - check account balances")
+            return self._ok({
+                "transfer_id": transfer.transfer_id,
+                "from_account_id": transfer.from_account_id,
+                "to_account_id": transfer.to_account_id,
+                "amount": transfer.amount,
+                "currency": transfer.currency,
+                "status": transfer.status.value,
+                "initiated_at": transfer.initiated_at,
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Internal transfer failed: {exc}")
+
+    def acct_cross_account_risk(self, user_id: str) -> dict:
+        """Compute cross-account risk metrics (ACCT-04)."""
+        try:
+            risk = self.platform.multi_account_service.compute_cross_account_risk(user_id)
+            return self._ok({
+                "user_id": risk["user_id"],
+                "total_exposure": risk["total_exposure"],
+                "max_exposure_per_account": risk["max_exposure_per_account"],
+                "concentration_risk": risk["concentration_risk"],
+                "correlation_risk": risk["correlation_risk"],
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Cross-account risk computation failed: {exc}")
+
     # ── Market Data APIs ─────────────────────────────────────────────────────────
 
     def get_orderbook(self, instrument_id: str) -> dict:

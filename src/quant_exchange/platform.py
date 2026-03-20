@@ -28,6 +28,7 @@ from quant_exchange.enhanced import (
     DSLService,
     FeatureStoreService,
     LedgerService,
+    MultiAccountService,
     ReplayService,
     ResearchMlService,
     UniverseService,
@@ -129,6 +130,7 @@ class QuantTradingPlatform:
         self.risk_exposure = RiskExposureAggregator()
         self.attribution = AttributionAnalyzer()
         self.multi_account = MultiAccountAllocator(self.persistence)
+        self.multi_account_service = MultiAccountService(self.persistence)  # ACCT-01~ACCT-04: Multi-account management
         self._register_default_adapters()
         self.crypto = CryptoWorkbenchService(self.adapters, self.market_data, cache_service=self.cache)
         self.futures = FuturesWorkbenchService(self.adapters, self.market_data)
