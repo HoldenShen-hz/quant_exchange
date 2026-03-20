@@ -138,7 +138,7 @@
 
 | 项目 | 状态 | 说明 |
 |------|------|------|
-| WebSocket实时推送 | ✅ | SSE Server-Sent Events已实现，支持bot状态/订单实时推送，HTTP轮询保留备用，SSEEventBroadcaster线程安全广播，订阅/取消订阅API |
+| WebSocket实时推送 | ✅ | _WebSocketServer实现(RFC 6455)，端口8081，实时行情推送替代HTTP轮询(3秒→亚秒级)，SSEEventBroadcaster处理bot状态/订单事件，HTTP轮询作为WebSocket不可用时的后备 |
 | PostgreSQL + TimescaleDB | ✅ | MigrationManager + PostgreSQLDDL基础设施已实现(迁移框架/Repository/BatchWriter/TransactionManager/DataTierManager/ConnectionPool)，DDL生成器覆盖所有核心表，支持TimescaleDB超表分区，production部署时执行迁移脚本即可 |
 | Redis缓存 | ✅ | RedisCacheService实现，cache-aside模式，自动降级in-memory，支持klines/instruments/prices缓存，60秒健康检查 |
 | Prometheus/Grafana监控 | ✅ | PrometheusMetricsCollector实现(counter/gauge/histogram)，MonitoringService.prometheus_metrics()导出Prometheus文本格式，ControlPlaneAPI prometheus_metrics端点，支持alert_count/orders/portfolio_equity等核心指标，Grafana dashboard生成器 |

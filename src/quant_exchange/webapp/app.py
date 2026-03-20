@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import socket
+import struct
 import threading
 import queue
+import select
 from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs
@@ -50,6 +55,199 @@ class SSEEventBroadcaster:
         """Return the number of connected clients."""
         with self._lock:
             return len(self._clients)
+
+
+class _WebSocketServer:
+    """A simple WebSocket server that broadcasts market data to all connected clients.
+
+    Uses the WebSocket protocol (RFC 6455) to handle connections and frame
+    processing via Python's socket module.
+    """
+
+    GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+    def __init__(self, port: int) -> None:
+        self.port = port
+        self._socket: socket.socket | None = None
+        self._thread: threading.Thread | None = None
+        self._running = False
+        self._clients: set[socket.socket] = set()
+        self._clients_lock = threading.Lock()
+
+    def start(self) -> None:
+        """Start the WebSocket server in a background thread."""
+        if self._running:
+            return
+        self._running = True
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._socket.bind(("", self.port))
+        self._socket.listen(5)
+        self._socket.settimeout(1.0)
+        self._thread = threading.Thread(target=self._run, name="websocket-server", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Stop the WebSocket server and close all client connections."""
+        self._running = False
+        if self._socket:
+            try:
+                self._socket.close()
+            except Exception:
+                pass
+        with self._clients_lock:
+            for client in list(self._clients):
+                try:
+                    client.close()
+                except Exception:
+                    pass
+            self._clients.clear()
+        if self._thread:
+            self._thread.join(timeout=2.0)
+
+    def _run(self) -> None:
+        """Accept WebSocket connections and handle them in separate threads."""
+        while self._running:
+            try:
+                client_sock, _ = self._socket.accept()
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+            threading.Thread(target=self._handle_client, args=(client_sock,), daemon=True).start()
+
+    def _handle_client(self, client: socket.socket) -> None:
+        """Handle a single WebSocket client connection."""
+        try:
+            if self._do_handshake(client):
+                with self._clients_lock:
+                    self._clients.add(client)
+                self._recv_loop(client)
+        except Exception:
+            pass
+        finally:
+            with self._clients_lock:
+                self._clients.discard(client)
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    def _do_handshake(self, client: socket.socket) -> bool:
+        """Perform the WebSocket handshake (HTTP Upgrade)."""
+        try:
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = client.recv(4096)
+                if not chunk:
+                    return False
+                data += chunk
+            lines = data.decode("utf-8", errors="ignore").split("\r\n")
+            headers: dict[str, str] = {}
+            for line in lines[1:]:
+                if ": " in line:
+                    key, val = line.split(": ", 1)
+                    headers[key.lower()] = val.strip()
+            if headers.get("upgrade") != "websocket" or "websocket-key" not in headers:
+                return False
+            key = headers["websocket-key"]
+            accept = base64.b64encode(hashlib.sha1((key + self.GUID).encode()).digest()).decode()
+            response = (
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Accept: {accept}\r\n"
+                "\r\n"
+            )
+            client.sendall(response.encode())
+            return True
+        except Exception:
+            return False
+
+    def _recv_loop(self, client: socket.socket) -> None:
+        """Receive and process WebSocket frames from a client."""
+        while self._running:
+            try:
+                frame = self._recv_frame(client)
+                if frame is None:
+                    break
+                opcode, payload = frame
+                if opcode == 0x8:
+                    self._send_frame(client, 0x8, b"")
+                    break
+            except Exception:
+                break
+
+    def _recv_frame(self, client: socket.socket) -> tuple[int, bytes] | None:
+        """Receive and decode a WebSocket frame."""
+        try:
+            header = client.recv(2)
+            if len(header) < 2:
+                return None
+            first_byte, second_byte = header
+            opcode = first_byte & 0x0F
+            length = second_byte & 0x7F
+            if length == 126:
+                ext = client.recv(2)
+                length = struct.unpack(">H", ext)[0]
+            elif length == 127:
+                ext = client.recv(8)
+                length = struct.unpack(">Q", ext)[0]
+            payload = b""
+            while len(payload) < length:
+                chunk = client.recv(length - len(payload))
+                if not chunk:
+                    return None
+                payload += chunk
+            return opcode, payload
+        except Exception:
+            return None
+
+    def _send_frame(self, client: socket.socket, opcode: int, payload: bytes) -> None:
+        """Encode and send a WebSocket frame to a client."""
+        try:
+            first_byte = 0x80 | opcode
+            if len(payload) < 126:
+                header = bytes([first_byte, len(payload)])
+            elif len(payload) < 65536:
+                header = bytes([first_byte, 126]) + struct.pack(">H", len(payload))
+            else:
+                header = bytes([first_byte, 127]) + struct.pack(">Q", len(payload))
+            client.sendall(header + payload)
+        except Exception:
+            pass
+
+    def broadcast(self, message: str) -> None:
+        """Broadcast a text message to all connected WebSocket clients."""
+        if not message:
+            return
+        payload = message.encode("utf-8")
+        dead = set()
+        with self._clients_lock:
+            clients = list(self._clients)
+        for client in clients:
+            try:
+                self._send_frame(client, 0x1, payload)
+            except Exception:
+                dead.add(client)
+        if dead:
+            with self._clients_lock:
+                self._clients -= dead
+
+    @property
+    def client_count(self) -> int:
+        """Return the number of connected WebSocket clients."""
+        with self._clients_lock:
+            return len(self._clients)
+
+
+# Global broadcaster instance shared by the app
+_ws_broadcaster: _WebSocketServer | None = None
+
+
+def get_market_broadcaster() -> _WebSocketServer | None:
+    """Return the global WebSocket market broadcaster instance."""
+    return _ws_broadcaster
 
 
 class _SSEResponse:
@@ -1114,7 +1312,48 @@ class StockScreenerWebApp:
 def run_dev_server(platform, host: str = "127.0.0.1", port: int = 8080) -> None:
     """Run the stock screener workbench with the Python stdlib server."""
 
+    global _ws_broadcaster
+    ws_port = 8081
+    _ws_broadcaster = _WebSocketServer(ws_port)
+    _ws_broadcaster.start()
+    print(f"WebSocket market server started on ws://{host}:{ws_port}/ws/market")
+
+    # Inject broadcaster into RealtimeMarketService post-refresh callback
+    realtime_svc = getattr(platform, "realtime_market", None)
+    if realtime_svc is not None:
+        _inject_market_broadcast(realtime_svc, _ws_broadcaster)
+
     app = StockScreenerWebApp(platform)
     with make_server(host, port, app) as server:
         print(f"Serving Stock Screener on http://{host}:{port}")
-        server.serve_forever()
+        try:
+            server.serve_forever()
+        finally:
+            if _ws_broadcaster:
+                _ws_broadcaster.stop()
+
+
+def _inject_market_broadcast(realtime_svc, broadcaster: _WebSocketServer) -> None:
+    """Inject WebSocket broadcast into RealtimeMarketService refresh cycle.
+
+    After each refresh_once(), the latest market snapshot is sent to all
+    WebSocket clients for sub-second real-time updates.
+    """
+    _original_run = realtime_svc._run
+
+    def _patched_run() -> None:
+        """Patched _run that broadcasts after each refresh."""
+        while not realtime_svc._stop_event.wait(realtime_svc.update_interval_seconds):
+            realtime_svc.refresh_once()
+            try:
+                snapshot = realtime_svc.snapshot()
+                payload = json.dumps({"type": "market_snapshot", "data": snapshot}, default=str)
+                broadcaster.broadcast(payload)
+            except Exception:
+                pass
+
+    realtime_svc._run = _patched_run
+    # Restart the thread if it was already running
+    if realtime_svc._thread is not None and realtime_svc._thread.is_alive():
+        realtime_svc.stop()
+        realtime_svc.start()

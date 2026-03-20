@@ -4006,7 +4006,10 @@ function scheduleRealtimePolling() {
   const nextPollMs = state.activeTab === "crypto" ? REALTIME_ACTIVE_POLL_MS : stockPollMs;
   state.realtimeTimer = window.setTimeout(async () => {
     try {
-      await loadRealtimeSnapshot();
+      // Use WebSocket for market data if connected, otherwise fall back to HTTP
+      if (!_marketWsConnected) {
+        await loadRealtimeSnapshot();
+      }
       if (state.activeTab === "crypto") {
         await loadCryptoUniverse({ preferredInstrumentId: state.activeCryptoInstrumentId, silent: true });
       }
@@ -5353,6 +5356,52 @@ document.getElementById("bot-create-form").addEventListener("submit", async (eve
   await createBotFromSelection();
 });
 
+/* ── WebSocket for Real-time Market Data ────────────────────────────── */
+let _marketWs = null;
+let _marketWsConnected = false;
+
+function connectMarketWebSocket() {
+  if (_marketWs) {
+    _marketWs.close();
+  }
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  const wsUrl = `${protocol}//${location.host}/ws/market`;
+  _marketWs = new WebSocket(wsUrl);
+
+  _marketWs.onopen = () => {
+    _marketWsConnected = true;
+    console.log("Market WebSocket connected");
+    updateMarketFeedStatus(null, null);
+  };
+
+  _marketWs.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      if (msg.type === "market_snapshot" && msg.data) {
+        applyRealtimeSnapshot(msg.data);
+      }
+    } catch (e) {
+      console.warn("Market WebSocket message parse error:", e);
+    }
+  };
+
+  _marketWs.onclose = () => {
+    _marketWsConnected = false;
+    _marketWs = null;
+    // Reconnect after 3 seconds if not intentionally closed
+    setTimeout(() => {
+      if (!_marketWsConnected) {
+        connectMarketWebSocket();
+      }
+    }, 3000);
+  };
+
+  _marketWs.onerror = () => {
+    _marketWsConnected = false;
+    updateMarketFeedStatus(null, "行情流暂时不可用，使用轮询模式。");
+  };
+}
+
 /* ── SSE (Server-Sent Events) for Real-time Updates ─────────────────── */
 let _sseSource = null;
 
@@ -5476,6 +5525,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   scheduleRealtimePolling();
   scheduleDownloadPolling();
   initSSE();
+  connectMarketWebSocket();
   // MOB-01~05: Register service worker for PWA offline support
   if ("serviceWorker" in navigator) {
     try {
