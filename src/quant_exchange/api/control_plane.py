@@ -1877,6 +1877,84 @@ class ControlPlaneAPI:
         except Exception as exc:
             return self._error("TEMPORARILY_UNAVAILABLE", f"LLM interpretation unavailable: {exc}")
 
+    # ── AI-01~AI-07: AI Assistant Chat ───────────────────────────────────────
+
+    def ai_chat(
+        self,
+        user_id: str,
+        query: str,
+        conv_id: str | None = None,
+        context: dict | None = None,
+    ) -> dict:
+        """Process a user query through the AI assistant (AI-01~AI-07).
+
+        Detects intent and generates LLM-powered responses for:
+        - Strategy code generation
+        - Research explanation
+        - Trading recommendations
+        - Risk advisory
+        - Portfolio review
+        - General questions
+        """
+        try:
+            ctx = dict(context or {})
+            if conv_id:
+                ctx["conv_id"] = conv_id
+            result = self.platform.ai_assistant.chat(user_id, query, ctx)
+            return result
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"AI assistant unavailable: {exc}")
+
+    def ai_create_strategy_draft(
+        self,
+        user_id: str,
+        description: str,
+        name: str = "",
+        language: str = "python",
+        indicators: list[str] | None = None,
+        timeframes: list[str] | None = None,
+    ) -> dict:
+        """Create a strategy draft via AI assistant (AI-01)."""
+        try:
+            draft = self.platform.ai_assistant.draft_strategy(
+                user_id=user_id,
+                description=description,
+                name=name,
+                language=language,
+                indicators=indicators or [],
+                timeframes=timeframes or ["1d"],
+            )
+            return self._ok({
+                "draft_id": draft.draft_id,
+                "strategy_code": draft.strategy_code,
+                "language": draft.language,
+                "name": draft.name,
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Strategy drafting unavailable: {exc}")
+
+    def ai_explain_topic(
+        self,
+        user_id: str,
+        topic: str,
+        format: str = "text",
+    ) -> dict:
+        """Generate explanation for a strategy/indicator/concept (AI-02)."""
+        try:
+            explanation = self.platform.ai_assistant.explain_topic(
+                user_id=user_id,
+                topic=topic,
+                format=format,
+            )
+            return self._ok({
+                "explanation_id": explanation.explanation_id,
+                "topic": explanation.topic,
+                "content": explanation.content,
+                "format": explanation.format,
+            })
+        except Exception as exc:
+            return self._error("TEMPORARILY_UNAVAILABLE", f"Explanation generation unavailable: {exc}")
+
     def risk_dashboard(self) -> dict:
         """Return combined risk dashboard data including kill-switch status, alerts, and metrics."""
 

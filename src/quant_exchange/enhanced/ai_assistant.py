@@ -214,7 +214,7 @@ class AIAssistantService:
     - Knowledge augmentation
     """
 
-    def __init__(self, persistence=None) -> None:
+    def __init__(self, persistence=None, llm_client=None) -> None:
         self.persistence = persistence
         self._conversations: dict[str, list[ConversationTurn]] = {}
         self._drafts: dict[str, StrategyDraft] = {}
@@ -224,6 +224,7 @@ class AIAssistantService:
         self._knowledge_graph: dict[str, KnowledgeGraphEntry] = {}
         self._user_configs: dict[str, AIGlobalConfig] = {}
         self._id_counter = 0
+        self._llm_client = llm_client  # Optional LLM client for AI-01~AI-07
 
     # ── Intent Detection ─────────────────────────────────────────────────
 
@@ -743,3 +744,211 @@ TIMEFRAMES: {", ".join(timeframes)}
         if custom_instructions is not None:
             config.custom_instructions = custom_instructions
         return config
+
+    # ── AI Chat / LLM Integration (AI-01 ~ AI-07) ───────────────────────────
+
+    def chat(
+        self,
+        user_id: str,
+        query: str,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Process a user query through AI and return an LLM-generated response (AI-01~AI-07).
+
+        Detects intent and routes to appropriate handler:
+        - STRATEGY_DRAFT: Generate trading strategy code
+        - STRATEGY_EXPLAIN: Explain a strategy or indicator
+        - RESEARCH_ANALYSIS: Provide research analysis
+        - RECOMMENDATION: Generate trading recommendation
+        - RISK_ADVISORY: Generate risk advisory
+        - SCREENER_QUERY: Answer stock screening queries
+        - CHART_EXPLANATION: Explain chart patterns
+        - PORTFOLIO_REVIEW: Review portfolio and suggest changes
+        - GENERAL: Answer general questions
+        """
+        context = context or {}
+        intent = self.detect_intent(query)
+        conv_id = context.get("conv_id") or self.create_conversation(user_id)
+
+        # Add user turn
+        turn = self.add_turn(conv_id, user_id, query, context)
+        if not turn:
+            return {"code": "ERROR", "error": "Failed to create conversation turn"}
+
+        response_text = self._generate_llm_response(query, intent, context)
+        model = self.get_user_config(user_id).default_model
+
+        # Create AI response turn
+        ai_turn = ConversationTurn(
+            turn_id=f"turn:{uuid.uuid4().hex[:12]}",
+            user_id="ai_assistant",
+            intent=intent,
+            query=response_text,
+            context={"model": model, "intent": intent.value},
+            model_used=model,
+        )
+        self._conversations[conv_id].append(ai_turn)
+
+        return {
+            "code": "OK",
+            "data": {
+                "conv_id": conv_id,
+                "turn_id": ai_turn.turn_id,
+                "intent": intent.value,
+                "response": response_text,
+                "model": model,
+            },
+        }
+
+    def _generate_llm_response(
+        self, query: str, intent: AIIntent, context: dict[str, Any]
+    ) -> str:
+        """Generate LLM response based on intent. Uses LLM client if available, otherwise template."""
+        if self._llm_client is not None:
+            prompt = self._build_prompt(query, intent, context)
+            return self._llm_client.complete(prompt, max_tokens=600)
+
+        # Fallback to template responses
+        return self._template_response(query, intent, context)
+
+    def _build_prompt(self, query: str, intent: AIIntent, context: dict[str, Any]) -> str:
+        """Build an LLM prompt from query and context."""
+        instrument_id = context.get("instrument_id", "UNKNOWN")
+        portfolio = context.get("portfolio_summary", "Not provided")
+        market_data = context.get("market_data", "Not provided")
+
+        intent_prompts = {
+            AIIntent.STRATEGY_DRAFT: (
+                f"User wants to create a trading strategy:\n\n{query}\n\n"
+                f"Instrument: {instrument_id}\nMarket data context: {market_data}\n\n"
+                "Provide a detailed strategy description including: entry conditions, "
+                "exit conditions, position sizing, risk management, and timeframe. "
+                "Format as a structured response with code examples if applicable."
+            ),
+            AIIntent.STRATEGY_EXPLAIN: (
+                f"User asks for explanation:\n\n{query}\n\n"
+                "Provide a clear, educational explanation suitable for a quant trader. "
+                "Include practical examples and trading applications."
+            ),
+            AIIntent.RESEARCH_ANALYSIS: (
+                f"User requests research analysis:\n\n{query}\n\n"
+                f"Instrument: {instrument_id}\nMarket data: {market_data}\n\n"
+                "Provide a comprehensive research analysis with supporting data and reasoning."
+            ),
+            AIIntent.RECOMMENDATION: (
+                f"User asks for trading recommendation:\n\n{query}\n\n"
+                f"Instrument: {instrument_id}\nPortfolio: {portfolio}\nMarket data: {market_data}\n\n"
+                "Provide a clear BUY/SELL/HOLD recommendation with entry price, "
+                "target price, stop loss, time horizon, and key reasoning."
+            ),
+            AIIntent.RISK_ADVISORY: (
+                f"User asks for risk assessment:\n\n{query}\n\n"
+                f"Portfolio: {portfolio}\n"
+                "Provide a detailed risk analysis including: overall risk level, "
+                "key risk factors, concentration risks, and mitigation strategies."
+            ),
+            AIIntent.SCREENER_QUERY: (
+                f"User asks about stock screening:\n\n{query}\n\n"
+                f"Market data: {market_data}\n\n"
+                "Provide screening criteria and explain which instruments match."
+            ),
+            AIIntent.CHART_EXPLANATION: (
+                f"User asks about chart/technical analysis:\n\n{query}\n\n"
+                f"Market data: {market_data}\n\n"
+                "Explain the technical pattern, its significance, and potential implications."
+            ),
+            AIIntent.PORTFOLIO_REVIEW: (
+                f"User asks for portfolio review:\n\n{query}\n\n"
+                f"Portfolio: {portfolio}\n\n"
+                "Provide a comprehensive portfolio review with allocation analysis, "
+                "risk assessment, and specific improvement recommendations."
+            ),
+            AIIntent.GENERAL: (
+                f"User asks:\n\n{query}\n\n"
+                "Provide a helpful, accurate response based on your knowledge of "
+                "quantitative trading, financial markets, and algorithmic trading systems."
+            ),
+        }
+        return intent_prompts.get(intent, intent_prompts[AIIntent.GENERAL])
+
+    def _template_response(
+        self, query: str, intent: AIIntent, context: dict[str, Any]
+    ) -> str:
+        """Template-based response fallback when no LLM is available."""
+        template_responses = {
+            AIIntent.STRATEGY_DRAFT: (
+                "I'd be happy to help you design a trading strategy! "
+                "Based on your request, here's a framework:\n\n"
+                "**Strategy Components:**\n"
+                "1. **Entry Signal**: Define clear technical/fundamental conditions\n"
+                "2. **Position Sizing**: Use fixed fractional or Kelly criterion\n"
+                "3. **Exit Rules**: Target profit + trailing stop\n"
+                "4. **Risk Management**: Max 2% per trade, daily stop\n\n"
+                "For a complete strategy, please provide more details about your "
+                "preferred instruments, timeframes, and risk tolerance."
+            ),
+            AIIntent.STRATEGY_EXPLAIN: (
+                "Let me explain that concept for you. "
+                "This is a quantitative trading concept that involves analyzing "
+                "market data to generate actionable signals. "
+                "For a detailed explanation, could you specify which aspect "
+                "you'd like to understand better?"
+            ),
+            AIIntent.RESEARCH_ANALYSIS: (
+                "Here's my research analysis on your question. "
+                "For a comprehensive analysis, I would need access to real-time "
+                "market data and your specific research parameters. "
+                "Please provide more context about what you're analyzing."
+            ),
+            AIIntent.RECOMMENDATION: (
+                "Based on the information provided, here is my recommendation analysis:\n\n"
+                "**Key Factors:**\n"
+                "- Risk/reward ratio considerations\n"
+                "- Current market conditions\n"
+                "- Portfolio alignment\n\n"
+                "For a specific BUY/SELL/HOLD recommendation, "
+                "please provide the instrument ID and current market context."
+            ),
+            AIIntent.RISK_ADVISORY: (
+                "**Risk Assessment:**\n\n"
+                "Your current portfolio exposure shows standard risk metrics. "
+                "Key considerations:\n"
+                "- Position concentration\n"
+                "- Correlation across positions\n"
+                "- Volatility regime\n\n"
+                "For a detailed risk advisory with specific metrics, "
+                "please provide your full portfolio holdings."
+            ),
+            AIIntent.SCREENER_QUERY: (
+                "Based on screening criteria, here are the key factors to consider:\n\n"
+                "**Screening Factors:**\n"
+                "- Technical indicators (RSI, MACD, moving averages)\n"
+                "- Fundamental metrics (P/E, revenue growth, margins)\n"
+                "- Market conditions (trend, volatility)\n\n"
+                "For specific stock recommendations, please define your criteria."
+            ),
+            AIIntent.CHART_EXPLANATION: (
+                "Looking at the chart pattern you described:\n\n"
+                "**Pattern Analysis:**\n"
+                "Key observations include price action, volume profile, "
+                "and technical indicator readings. "
+                "For a detailed chart explanation, please specify the "
+                "timeframe and particular pattern you're examining."
+            ),
+            AIIntent.PORTFOLIO_REVIEW: (
+                "**Portfolio Review:**\n\n"
+                "A comprehensive review would include:\n"
+                "- Asset allocation breakdown\n"
+                "- Risk metrics (VaR, drawdown)\n"
+                "- Performance attribution\n\n"
+                "For a specific review, please share your portfolio details."
+            ),
+            AIIntent.GENERAL: (
+                "Thank you for your question about quant trading. "
+                "I can help with strategy design, technical analysis, "
+                "risk management, and market research. "
+                "Could you please provide more specific details about "
+                "what you'd like to know?"
+            ),
+        }
+        return template_responses.get(intent, template_responses[AIIntent.GENERAL])

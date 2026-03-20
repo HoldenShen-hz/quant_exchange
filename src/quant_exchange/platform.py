@@ -19,6 +19,7 @@ from quant_exchange.futures import FuturesWorkbenchService
 from quant_exchange.infrastructure.cache import CacheService, RedisCacheService, InMemoryCacheService
 from quant_exchange.futures.service import FuturesTradingService
 from quant_exchange.enhanced import (
+    AIAssistantService,
     AdvancedExecutionService,
     AlternativeDataService,
     BiasAuditService,
@@ -76,6 +77,7 @@ class QuantTradingPlatform:
         self.cache: CacheService = RedisCacheService()
         self.intelligence = IntelligenceEngine()
         self.llm_interp = LLMInterpretationService(self.intelligence)  # IN-07: LLM interpretation
+        self.ai_assistant = AIAssistantService(persistence=self.persistence)  # AI-01~AI-07: AI/LLM assistant
         self._seed_intelligence_data()
         self.learning = LearningHubService()
         self.risk = RiskEngine()

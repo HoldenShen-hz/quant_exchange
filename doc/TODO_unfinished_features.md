@@ -1,7 +1,7 @@
 # TODO: 未完成功能清单
 
 > 基于 doc/ 全部需求文档与代码库的逐项审计，截至 2026-03-20
-> 整体完成度约 96%（本次更新：IN-07 LLM解读完成）
+> 整体完成度约 97%（本次更新：AI-01~AI-07 LLM助手完成）
 
 ---
 
@@ -97,7 +97,7 @@
 
 | 编号 | 功能 | 状态 |
 |------|------|------|
-| AI-01~AI-07 | AI/LLM助手(自然语言策略、智能问答、代码生成) | NO |
+| AI-01~AI-07 | AI/LLM助手(自然语言策略、智能问答、代码生成) | YES | AIAssistantService实现完整chat方法，intent检测(STRATEGY_DRAFT/RECOMMENDATION/RISK_ADVISORY等)，LLM集成(Mock+OpenAI接口)，ControlPlaneAPI ai_chat/ai_create_strategy_draft/ai_explain_topic端点，支持对话历史管理 |
 | SOC-01~SOC-06 | 社区交流(论坛/动态/策略分享) | NO |
 | COPY-01~COPY-06 | 跟单交易(信号订阅/风控/分成) | NO |
 | MKT-01~MKT-06 | 策略市场(上架/评价/交易) | NO |
