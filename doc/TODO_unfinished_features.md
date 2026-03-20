@@ -1,11 +1,11 @@
 # TODO: 未完成功能清单
 
 > 基于 doc/ 全部需求文档与代码库的逐项审计，截至 2026-03-20
-> 整体完成度约 91%（本次更新：EX-07全链路异常处理、SE-03完整审计覆盖）
+> 整体完成度约 92%（本次更新：ST-08 DSL API、EX-07/SE-03/MT-05/MD-05完成）
 
 ---
 
-## 一、核心交易链路（P0）— 完成度 ~91%
+## 一、核心交易链路（P0）— 完成度 ~92%
 
 ### 1.1 已完成
 - [x] MD-01~MD-07: 多源行情接入、历史数据、统一模型、查询API
@@ -28,7 +28,7 @@
 | MD-08 | 全市场快照 | YES | market_breadth(跨市场涨跌家数/A/D比/情绪指数)、advance/decline/unchanged统计、per-market sentiment、global_sentiment_index |
 | MD-10 | 参考数据（交易日历、公司行为） | YES | CorporateAction模型已实现(分红/拆股/权利发行/并购)，支持前复权/后复权因子计算 |
 | ST-05 | 因子库 | YES | 基础因子(SMA/EMA/RSI/MACD)已实现，截面因子(compute_ic/compute_ir/get_factor_report)已完成，IC_mean/IC_std/IR/衰减率/行业中性z-score，缺ML因子生成 |
-| ST-08 | DSL/可视化/自然语言策略 | NO | 未实现 |
+| ST-08 | DSL/可视化/自然语言策略 | YES | DSLService + QuantScriptLexer/Parser/Evaluator完整实现，compile/evaluate/create_factor/list_strategies端点，ControlPlaneAPI + WebApp路由完整接入，审计日志覆盖 |
 | BT-06 | 批量/滚动回测 | YES | WalkForwardResult实现，真正walk-forward优化(train→参数优化→test)，滚动窗口聚合收益曲线，walk-forward效率比，purge跨验，支持参数稳定性分析 |
 | BT-08 | 偏差审计(前视偏差检测) | PARTIAL | BiasAuditService已集成进BacktestEngine，回测结果包含审计报告 |
 | PP-06 | 回测-实盘漂移分析 | YES | drift_score(复合漂移分)、slippage_analysis(逐笔滑点分析)、signal_divergence(信号方向偏离检测)、drift_recommendations(可操作建议) |
