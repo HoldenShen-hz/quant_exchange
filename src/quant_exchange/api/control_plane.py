@@ -37,6 +37,7 @@ class ControlPlaneAPI:
         self.scheduler = scheduler
         self.market_rules = market_rules
         self.sessions: dict[str, dict[str, Any]] = {}
+        self._watchlist_groups: dict[str, dict] = {}
 
     def create_user(self, username: str, password: str, role: Role, display_name: str | None = None) -> dict:
         """Create a user and assign an initial role."""
@@ -1475,6 +1476,198 @@ class ControlPlaneAPI:
         if not transfer:
             return self._error("BAD_REQUEST", "Transfer failed - check account balances")
         return self._ok(self._serialize(transfer))
+
+    # ── Market Data APIs ─────────────────────────────────────────────────────────
+
+    def get_orderbook(self, instrument_id: str) -> dict:
+        """Return the latest order book snapshot for an instrument (五档盘口)."""
+        ob = self.platform.market_data.get_orderbook(instrument_id)
+        if not ob:
+            return self._ok({"instrument_id": instrument_id, "bids": [], "asks": [], "timestamp": None})
+        return self._ok({
+            "instrument_id": instrument_id,
+            "bids": [[price, qty] for price, qty in ob.bids],
+            "asks": [[price, qty] for price, qty in ob.asks],
+            "timestamp": ob.timestamp.isoformat() if ob.timestamp else None,
+        })
+
+    def get_trade_ticks(self, instrument_id: str, limit: int = 50) -> dict:
+        """Return recent trade ticks for an instrument (成交明细)."""
+        ticks = self.platform.market_data.query_ticks(instrument_id)
+        recent = ticks[-limit:] if len(ticks) > limit else ticks
+        return self._ok([{
+            "instrument_id": t.instrument_id,
+            "price": t.price,
+            "quantity": t.quantity,
+            "side": t.side.value if hasattr(t.side, 'value') else str(t.side),
+            "timestamp": t.timestamp.isoformat() if t.timestamp else None,
+        } for t in recent])
+
+    # ── Alert History APIs ──────────────────────────────────────────────────────
+
+    def get_alert_history(self, window_hours: int = 24, severity: str | None = None) -> dict:
+        """Return alert history for the specified time window (MO-06)."""
+        from datetime import timedelta
+        from quant_exchange.core.models import AlertSeverity
+        cutoff = timedelta(hours=window_hours)
+        now = datetime.now(timezone.utc)
+        alerts = self.platform.monitoring.recent_alerts(window=cutoff)
+        if severity:
+            try:
+                sev = AlertSeverity(severity)
+                alerts = [a for a in alerts if a.severity == sev]
+            except ValueError:
+                pass
+        return self._ok([{
+            "code": a.code,
+            "severity": a.severity.value,
+            "message": a.message,
+            "timestamp": a.timestamp.isoformat(),
+            "context": a.context,
+        } for a in alerts])
+
+    # ── Report APIs ─────────────────────────────────────────────────────────────
+
+    def get_daily_report(self, account_id: str = "paper_stock_main") -> dict:
+        """Return daily report summary (RP-05)."""
+        # Get paper trading account data via dashboard
+        data = self.platform.paper_trading.dashboard(account_code=account_id)
+        snapshot = data.get("snapshot", {})
+        positions = data.get("positions", [])
+        fills = data.get("fills", [])
+        alerts = self.platform.monitoring.alerts
+        # Convert positions list to dict format expected by reporting
+        pos_dict = {p["instrument_id"]: p for p in positions}
+        report = self.platform.reporting.daily_report(
+            account_id=account_id,
+            snapshot=snapshot,
+            positions=pos_dict,
+            fills=fills,
+            alerts=alerts,
+        )
+        return self._ok(report)
+
+    def get_weekly_report(self, account_id: str = "paper_stock_main") -> dict:
+        """Return weekly report summary (RP-05)."""
+        data = self.platform.paper_trading.dashboard(account_code=account_id)
+        snapshot = data.get("snapshot", {})
+        positions = data.get("positions", [])
+        fills = data.get("fills", [])
+        alerts = self.platform.monitoring.alerts
+        pos_dict = {p["instrument_id"]: p for p in positions}
+        report = self.platform.reporting.weekly_report(
+            account_id=account_id,
+            snapshots=[snapshot] if snapshot else [],
+            positions=pos_dict,
+            fills=fills,
+            alerts=alerts,
+        )
+        return self._ok(report)
+
+    def get_monthly_report(self, account_id: str = "paper_stock_main") -> dict:
+        """Return monthly report summary (RP-05)."""
+        data = self.platform.paper_trading.dashboard(account_code=account_id)
+        snapshot = data.get("snapshot", {})
+        positions = data.get("positions", [])
+        fills = data.get("fills", [])
+        alerts = self.platform.monitoring.alerts
+        pos_dict = {p["instrument_id"]: p for p in positions}
+        report = self.platform.reporting.monthly_report(
+            account_id=account_id,
+            snapshots=[snapshot] if snapshot else [],
+            positions=pos_dict,
+            fills=fills,
+            alerts=alerts,
+        )
+        return self._ok(report)
+
+    # ── Watchlist Grouping APIs ─────────────────────────────────────────────────
+
+    def create_watchlist_group(self, user_id: str, group_name: str) -> dict:
+        """Create a new watchlist group (自选股分组管理)."""
+        key = f"{user_id}:{group_name}"
+        if key in self._watchlist_groups:
+            return self._ok(self._watchlist_groups[key])
+        group = {
+            "group_id": key,
+            "user_id": user_id,
+            "group_name": group_name,
+            "instruments": [],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._watchlist_groups[key] = group
+        return self._ok(group)
+
+    def get_watchlist_groups(self, user_id: str) -> dict:
+        """Get all watchlist groups for a user."""
+        groups = [g for k, g in self._watchlist_groups.items() if k.startswith(f"{user_id}:")]
+        return self._ok(groups)
+
+    def add_to_watchlist_group(self, user_id: str, group_name: str, instrument_id: str) -> dict:
+        """Add an instrument to a watchlist group."""
+        key = f"{user_id}:{group_name}"
+        if key not in self._watchlist_groups:
+            self.create_watchlist_group(user_id, group_name)
+        group = self._watchlist_groups[key]
+        if instrument_id not in group.get("instruments", []):
+            group.setdefault("instruments", []).append(instrument_id)
+        return self._ok(group)
+
+    # ── Futures Paper Trading APIs ───────────────────────────────────────────────
+
+    def submit_futures_order(
+        self,
+        instrument_id: str,
+        side: str,
+        quantity: int,
+        order_type: str = "market",
+        limit_price: float | None = None,
+    ) -> dict:
+        """Submit a futures paper order (FT-05)."""
+        if self.platform.futures_trading is None:
+            return self._error("NOT_IMPLEMENTED", "Futures trading not available")
+        result = self.platform.futures_trading.submit_order(
+            instrument_id=instrument_id,
+            side=side,
+            quantity=quantity,
+            order_type=order_type,
+            limit_price=limit_price,
+        )
+        return self._ok(result)
+
+    def get_futures_positions(self) -> dict:
+        """Get current futures positions."""
+        if self.platform.futures_trading is None:
+            return self._error("NOT_IMPLEMENTED", "Futures trading not available")
+        positions = getattr(self.platform.futures_trading, "positions", {})
+        return self._ok(self._serialize(positions))
+
+    # ── Technical Indicator APIs ─────────────────────────────────────────────────
+
+    def calculate_indicator(
+        self,
+        indicator: str,
+        prices: list[float],
+        **params,
+    ) -> dict:
+        """Calculate technical indicator (MACD/KDJ/BOLL etc.) (CHART-02)."""
+        from quant_exchange.strategy import factors
+        indicator_map = {
+            "MACD": factors.macd,
+            "KDJ": factors.stochastic_k,
+            "BOLL": factors.bollinger_bands,
+            "RSI": factors.relative_strength_index,
+            "CCI": factors.commodity_channel_index,
+            "ATR": factors.average_true_range,
+        }
+        if indicator not in indicator_map:
+            return self._error("BAD_REQUEST", f"Unknown indicator: {indicator}")
+        func = indicator_map[indicator]
+        try:
+            result = func(prices, **params)
+            return self._ok({"indicator": indicator, "result": result})
+        except Exception as e:
+            return self._error("CALCULATION_ERROR", str(e))
 
     def _serialize(self, value: Any) -> Any:
         if is_dataclass(value):

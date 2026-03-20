@@ -45,6 +45,7 @@ const CHART_RANGES = [30, 60, 120, 240];
 const CHART_MODES = [
   { value: "candles", label: "K线" },
   { value: "line", label: "折线" },
+  { value: "intraday", label: "分时" },
 ];
 const REALTIME_ACTIVE_POLL_MS = 4000;
 const REALTIME_IDLE_POLL_MS = 30000;
@@ -91,6 +92,9 @@ const state = {
   watchlist: [],
   chartRange: 120,
   chartMode: "candles",
+  activeIndicator: null, // "MACD" | "KDJ" | "BOLL" | null
+  chartDrawingMode: null, // null | "trendline" | "fibonacci"
+  chartDrawings: [], // Array of {type, points: [{x,y,price,index}], color}
   cryptoChartRange: 120,
   cryptoChartMode: "candles",
   activePreset: null,
@@ -243,7 +247,7 @@ function snapshotWorkspaceState() {
     active_instrument_id: state.activeInstrumentId,
     watchlist: [...state.watchlist],
     sort: { sort_by: state.sortBy, sort_desc: state.sortDesc },
-    chart: { range: state.chartRange, mode: state.chartMode },
+    chart: { range: state.chartRange, mode: state.chartMode, indicator: state.activeIndicator, drawingMode: state.chartDrawingMode, drawings: state.chartDrawings },
     crypto: {
       active_instrument_id: state.activeCryptoInstrumentId,
       chart: { range: state.cryptoChartRange, mode: state.cryptoChartMode },
@@ -540,8 +544,8 @@ function renderDetail(stock) {
   /* === 2. Recent visits sidebar === */
   renderStockRecentSidebar();
 
-  /* === 3. Simulated order book === */
-  renderSimulatedOrderbook(stock, lastPrice);
+  /* === 3. Order book + trade ticks from API === */
+  refreshOrderbookAndTicks();
 
   /* === 4. F10 sub-tab content (default: overview) === */
   renderStockSubTab("overview", stock);
@@ -1048,9 +1052,16 @@ function renderHistoryChart(payload, { containerId, statusId, mode }) {
   const candleWidth = Math.max(step * 0.66, 2.6);
   const priceY = (price) => margin.top + ((maxHigh - price) / priceRange) * pricePlotHeight;
   const volumeY = (volume) => margin.top + pricePlotHeight + 12 + (1 - volume / maxVolume) * volumeHeight;
+  const barX = (index) => margin.left + step * index + step / 2;
+  const priceFromY = (svgY) => maxHigh - ((svgY - margin.top) / pricePlotHeight) * priceRange;
+  const barIndexFromX = (svgX) => Math.round((svgX - margin.left - step / 2) / step);
+
+  // Store chart metadata for drawing click handler
+  const svgMeta = { width, height, margin, plotWidth, plotHeight, pricePlotHeight, volumeHeight, step, candleWidth, maxHigh, minLow, priceRange, maxVolume, bars, barX, priceY, priceFromY, barIndexFromX };
+
   const linePath = bars
     .map((bar, index) => {
-      const x = margin.left + step * index + step / 2;
+      const x = barX(index);
       const y = priceY(bar.close);
       return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
     })
@@ -1072,8 +1083,8 @@ function renderHistoryChart(payload, { containerId, statusId, mode }) {
     .join("");
   const candles = bars
     .map((bar, index) => {
-      const x = margin.left + step * index + step / 2 - candleWidth / 2;
-      const wickX = x + candleWidth / 2;
+      const x = barX(index) - candleWidth / 2;
+      const wickX = barX(index);
       const openY = priceY(bar.open);
       const closeY = priceY(bar.close);
       const highY = priceY(bar.high);
@@ -1094,13 +1105,16 @@ function renderHistoryChart(payload, { containerId, statusId, mode }) {
   function maPath(maValues, color) {
     const points = maValues.map((v, i) => {
       if (v === null) return null;
-      const x = margin.left + step * i + step / 2;
+      const x = barX(i);
       const y = priceY(v);
       return `${x.toFixed(2)} ${y.toFixed(2)}`;
     }).filter(Boolean);
     if (!points.length) return '';
     return `<polyline points="${points.join(' ')}" fill="none" stroke="${color}" stroke-width="1.2" opacity="0.85" />`;
   }
+
+  // CHART-01: Render existing drawings
+  const drawingsSvg = renderChartDrawings(svgMeta, state.chartDrawings);
 
   status.textContent = `${payload.symbol} 最近 ${bars.length} 根K线`;
   card.className = "kline-card";
@@ -1115,7 +1129,7 @@ function renderHistoryChart(payload, { containerId, statusId, mode }) {
       <span class="kline-stat" style="border-color:rgba(88,166,255,0.3);color:#58a6ff">MA10 ${ma10[ma10.length-1] !== null ? formatNumber(ma10[ma10.length-1]) : '-'}</span>
       <span class="kline-stat" style="border-color:rgba(210,168,255,0.3);color:#d2a8ff">MA20 ${ma20[ma20.length-1] !== null ? formatNumber(ma20[ma20.length-1]) : '-'}</span>
     </div>
-    <svg class="kline-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${payload.symbol} historical chart">
+    <svg class="kline-svg" data-chart-meta='${JSON.stringify({ bars_count: bars.length, maxHigh, minLow, marginLeft: margin.left, marginTop: margin.top, marginRight: margin.right, plotWidth, plotHeight, pricePlotHeight, volumeHeight, step, maxHigh, minLow, priceRange })}' viewBox="0 0 ${width} ${height}" role="img" aria-label="${payload.symbol} historical chart">
       <rect x="0" y="0" width="${width}" height="${height}" fill="transparent"></rect>
       ${gridLines}
       <line x1="${margin.left}" y1="${margin.top + pricePlotHeight}" x2="${width - margin.right}" y2="${margin.top + pricePlotHeight}" stroke="rgba(48,54,61,0.6)" />
@@ -1129,12 +1143,470 @@ function renderHistoryChart(payload, { containerId, statusId, mode }) {
       <text x="${width - margin.right - 74}" y="${height - 10}" fill="#7d8590" font-size="12">${bars[bars.length - 1].trade_date}</text>
       <text x="${width - margin.right - 58}" y="${margin.top + 10}" fill="#7d8590" font-size="12">${formatNumber(maxHigh)}</text>
       <text x="${width - margin.right - 58}" y="${margin.top + pricePlotHeight - 2}" fill="#7d8590" font-size="12">${formatNumber(minLow)}</text>
+      <!-- CHART-01: Drawing overlay -->
+      <g id="chart-drawings-layer">${drawingsSvg}</g>
+      <!-- Click capture overlay for drawing tools -->
+      <rect id="chart-click-overlay" x="${margin.left}" y="${margin.top}" width="${plotWidth}" height="${pricePlotHeight}" fill="transparent" cursor="${state.chartDrawingMode ? 'crosshair' : 'default'}" />
     </svg>
   `;
+
+  // Attach click handler for drawing tools
+  const overlay = document.getElementById("chart-click-overlay");
+  if (overlay) {
+    overlay.addEventListener("click", (e) => {
+      if (!state.chartDrawingMode) return;
+      const svg = e.currentTarget.closest("svg.kline-svg");
+      if (!svg) return;
+      const rect = svg.getBoundingClientRect();
+      const svgX = ((e.clientX - rect.left) / rect.width) * width;
+      const svgY = ((e.clientY - rect.top) / rect.height) * height;
+      const meta = JSON.parse(svg.dataset.chartMeta || "{}");
+      const barsCount = meta.bars_count || bars.length;
+      const m = { marginLeft: margin.left, marginTop: margin.top, plotWidth, pricePlotHeight, step, maxHigh, minLow, priceRange };
+      handleChartDrawingClick(svgX, svgY, m, bars, svgMeta);
+    });
+  }
+}
+
+/* ── CHART-01: Trendline and Fibonacci Drawing Tools ─────────────────────── */
+
+function handleChartDrawingClick(svgX, svgY, m, bars, svgMeta) {
+  if (!state.chartDrawingMode) return;
+  const idx = Math.round((svgX - m.marginLeft - svgMeta.step / 2) / svgMeta.step);
+  const clampedIdx = Math.max(0, Math.min(bars.length - 1, idx));
+  const bar = bars[clampedIdx];
+  if (!bar) return;
+  const price = svgMeta.maxHigh - ((svgY - svgMeta.margin.top) / svgMeta.pricePlotHeight) * svgMeta.priceRange;
+  const drawing = {
+    type: state.chartDrawingMode,
+    points: [{ x: svgX, y: svgY, price, barIndex: clampedIdx, date: bar.trade_date }],
+    color: state.chartDrawingMode === "trendline" ? "#f0883e" : "#58a6ff",
+  };
+  if (state.chartDrawingMode === "fibonacci") {
+    // Fibonacci needs 2 points (swing high/low)
+    state.chartDrawings.push(drawing);
+    if (state.chartDrawings.length > 0) {
+      const last = state.chartDrawings[state.chartDrawings.length - 1];
+      if (last.type === "fibonacci" && last.points.length < 2) {
+        // Second click completes the fibonacci
+        last.points.push({ x: svgX, y: svgY, price, barIndex: clampedIdx, date: bar.trade_date });
+      } else {
+        // Start new fibonacci
+        state.chartDrawings.push({ type: "fibonacci", points: [{ x: svgX, y: svgY, price, barIndex: clampedIdx, date: bar.trade_date }], color: "#58a6ff" });
+      }
+    }
+    // Re-render chart to show updated drawing
+    if (state.activeInstrumentId) loadKlines(state.activeInstrumentId);
+    return;
+  }
+  // Trendline: single click adds point, two clicks complete it
+  if (state.chartDrawingMode === "trendline") {
+    state.chartDrawings.push(drawing);
+    if (state.chartDrawings.length > 0) {
+      const last = state.chartDrawings[state.chartDrawings.length - 1];
+      if (last.type === "trendline" && last.points.length < 2) {
+        last.points.push({ x: svgX, y: svgY, price, barIndex: clampedIdx, date: bar.trade_date });
+      } else {
+        state.chartDrawings.push({ type: "trendline", points: [{ x: svgX, y: svgY, price, barIndex: clampedIdx, date: bar.trade_date }], color: "#f0883e" });
+      }
+    }
+    if (state.activeInstrumentId) loadKlines(state.activeInstrumentId);
+  }
+}
+
+function renderChartDrawings(svgMeta, drawings) {
+  if (!drawings || !drawings.length) return "";
+  const { margin, plotWidth, pricePlotHeight, priceRange, maxHigh, step } = svgMeta;
+  const priceToY = (p) => margin.top + ((maxHigh - p) / priceRange) * pricePlotHeight;
+  let svgParts = [];
+
+  for (const drawing of drawings) {
+    if (drawing.type === "trendline" && drawing.points.length >= 2) {
+      const [p1, p2] = drawing.points;
+      svgParts.push(`<line x1="${p1.x.toFixed(1)}" y1="${p1.y.toFixed(1)}" x2="${p2.x.toFixed(1)}" y2="${p2.y.toFixed(1)}" stroke="${drawing.color}" stroke-width="1.5" stroke-dasharray="5 3" opacity="0.9"/>`);
+      // Price labels
+      svgParts.push(`<text x="${p1.x.toFixed(1)}" y="${(p1.y - 4).toFixed(1)}" fill="${drawing.color}" font-size="11" text-anchor="middle">${formatNumber(p1.price)}</text>`);
+      svgParts.push(`<text x="${p2.x.toFixed(1)}" y="${(p2.y - 4).toFixed(1)}" fill="${drawing.color}" font-size="11" text-anchor="middle">${formatNumber(p2.price)}</text>`);
+    } else if (drawing.type === "fibonacci" && drawing.points.length >= 2) {
+      const [p1, p2] = drawing.points;
+      const high = Math.max(p1.price, p2.price);
+      const low = Math.min(p1.price, p2.price);
+      const diff = high - low;
+      const levels = [
+        { ratio: 0, label: "0%", color: "#848487" },
+        { ratio: 0.236, label: "23.6%", color: "#58a6ff" },
+        { ratio: 0.382, label: "38.2%", color: "#58a6ff" },
+        { ratio: 0.5, label: "50%", color: "#f0883e" },
+        { ratio: 0.618, label: "61.8%", color: "#58a6ff" },
+        { ratio: 1, label: "100%", color: "#d2a8ff" },
+        { ratio: 1.618, label: "161.8%", color: "#f85149", extension: true },
+        { ratio: 2.618, label: "261.8%", color: "#f85149", extension: true },
+      ];
+      const x1 = Math.min(p1.x, p2.x);
+      const x2 = Math.max(p1.x, p2.x);
+      for (const lvl of levels) {
+        const lvlPrice = low + diff * lvl.ratio;
+        const y = priceToY(lvlPrice);
+        if (y >= margin.top && y <= margin.top + pricePlotHeight) {
+          svgParts.push(`<line x1="${x1.toFixed(1)}" y1="${y.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y.toFixed(1)}" stroke="${lvl.color}" stroke-width="${lvl.extension ? 1 : 1.2}" stroke-dasharray="${lvl.extension ? '4 4' : '6 3'}" opacity="${lvl.extension ? 0.6 : 0.8}"/>`);
+          svgParts.push(`<text x="${(x2 + 4).toFixed(1)}" y="${(y + 4).toFixed(1)}" fill="${lvl.color}" font-size="11" opacity="0.9">${lvl.label}</text>`);
+        }
+      }
+      // Label endpoints
+      svgParts.push(`<text x="${x1.toFixed(1)}" y="${(priceToY(high) - 4).toFixed(1)}" fill="#848487" font-size="11" text-anchor="middle">高 ${formatNumber(high)}</text>`);
+      svgParts.push(`<text x="${x1.toFixed(1)}" y="${(priceToY(low) + 12).toFixed(1)}" fill="#848487" font-size="11" text-anchor="middle">低 ${formatNumber(low)}</text>`);
+    }
+  }
+  return svgParts.join("");
 }
 
 function renderKlineChart(payload) {
   renderHistoryChart(payload, { containerId: "kline-card", statusId: "chart-status", mode: state.chartMode });
+  if (state.activeIndicator && payload.bars && payload.bars.length) {
+    fetchAndRenderIndicatorPanel(payload.bars);
+  } else {
+    const existingPanel = document.getElementById("indicator-panel");
+    if (existingPanel) existingPanel.remove();
+  }
+}
+
+/* ── Indicator panels: MACD / KDJ / BOLL (CHART-02) ─────────────── */
+async function fetchAndRenderIndicatorPanel(bars) {
+  const container = document.getElementById("kline-card");
+  if (!container) return;
+
+  // Remove existing panel
+  const existing = document.getElementById("indicator-panel");
+  if (existing) existing.remove();
+
+  if (!state.activeIndicator) return;
+
+  const closes = bars.map((b) => b.close);
+  const result = await postJson("/api/indicators/calculate", {
+    indicator: state.activeIndicator,
+    prices: closes,
+    params: state.activeIndicator === "MACD" ? { fast: 12, slow: 26, signal: 9 } : {},
+  });
+
+  if (result.code !== "OK" || !result.data) return;
+
+  const indContainer = document.createElement("div");
+  indContainer.id = "indicator-panel";
+  indContainer.style.marginTop = "8px";
+
+  const svg = renderIndicatorSVG(state.activeIndicator, result.data.result, bars);
+  indContainer.innerHTML = `<div class="indicator-label" style="font-size:12px;color:#7d8590;margin-bottom:4px;">${state.activeIndicator} 指标</div>${svg}`;
+  container.appendChild(indContainer);
+}
+
+function renderIndicatorSVG(indicator, data, bars) {
+  if (indicator === "MACD") {
+    return renderMACDSVG(data, bars);
+  } else if (indicator === "KDJ") {
+    return renderKDJSVG(data, bars);
+  } else if (indicator === "BOLL") {
+    return renderBOLLSVG(data, bars);
+  }
+  return "";
+}
+
+function renderMACDSVG(macdData, bars) {
+  // macdData: { macd: [], signal: [], histogram: [] } or { dif: [], dea: [], bar: [] }
+  const width = 960;
+  const height = 140;
+  const margin = { top: 10, right: 18, bottom: 24, left: 18 };
+  const plotW = width - margin.left - margin.right;
+  const plotH = height - margin.top - margin.bottom;
+
+  const allValues = [];
+  const dif = macdData.dif || macdData.macd || [];
+  const dea = macdData.dea || macdData.signal || [];
+  const bars_arr = macdData.bar || macdData.histogram || [];
+  dif.forEach((v) => { if (v !== null) allValues.push(v); });
+  dea.forEach((v) => { if (v !== null) allValues.push(v); });
+  bars_arr.forEach((v) => { if (v !== null) allValues.push(v); });
+
+  if (!allValues.length) return `<svg width="${width}" height="${height}"><text x="10" y="60" fill="#7d8590">MACD 数据不可用</text></svg>`;
+
+  const maxV = Math.max(...allValues);
+  const minV = Math.min(...allValues);
+  const range = Math.max(maxV - minV, 0.001);
+  const zeroY = margin.top + ((maxV - 0) / range) * plotH;
+  const step = plotW / Math.max(dif.length - 1, 1);
+
+  const lineY = (v) => {
+    if (v === null) return null;
+    return margin.top + ((maxV - v) / range) * plotH;
+  };
+
+  const difPath = dif.map((v, i) => {
+    const y = lineY(v);
+    if (y === null) return null;
+    return `${i === 0 ? "M" : "L"} ${(margin.left + step * i).toFixed(1)} ${y.toFixed(1)}`;
+  }).filter(Boolean).join(" ");
+
+  const deaPath = dea.map((v, i) => {
+    const y = lineY(v);
+    if (y === null) return null;
+    return `${i === 0 ? "M" : "L"} ${(margin.left + step * i).toFixed(1)} ${y.toFixed(1)}`;
+  }).filter(Boolean).join(" ");
+
+  const barRects = bars_arr.map((v, i) => {
+    if (v === null) return "";
+    const x = margin.left + step * i;
+    const y0 = zeroY;
+    const y1 = lineY(v);
+    if (y1 === null) return "";
+    const color = v >= 0 ? "rgba(63,185,80,0.7)" : "rgba(248,81,73,0.7)";
+    const ry = Math.min(y0, y1);
+    const rh = Math.max(Math.abs(y1 - y0), 1);
+    return `<rect x="${x}" y="${ry}" width="${Math.max(step * 0.7, 2)}" height="${rh}" fill="${color}" />`;
+  }).join("");
+
+  const grid0 = `<line x1="${margin.left}" y1="${zeroY}" x2="${width - margin.right}" y2="${zeroY}" stroke="rgba(48,54,61,0.6)" stroke-dasharray="3 4" />`;
+
+  const difLine = difPath ? `<path d="${difPath}" fill="none" stroke="#f0883e" stroke-width="1.5" />` : "";
+  const deaLine = deaPath ? `<path d="${deaPath}" fill="none" stroke="#58a6ff" stroke-width="1.5" />` : "";
+
+  return `
+  <svg width="${width}" height="${height}" role="img" aria-label="MACD indicator">
+    ${grid0}
+    ${barRects}
+    ${difLine}
+    ${deaLine}
+    <text x="${margin.left + 4}" y="${margin.top + 12}" fill="#f0883e" font-size="11">DIF</text>
+    <text x="${margin.left + 44}" y="${margin.top + 12}" fill="#58a6ff" font-size="11">DEA</text>
+  </svg>`;
+}
+
+function renderKDJSVG(kdjData, bars) {
+  // kdjData: { k: [], d: [], j: [] }
+  const width = 960;
+  const height = 140;
+  const margin = { top: 10, right: 18, bottom: 24, left: 18 };
+  const plotW = width - margin.left - margin.right;
+  const plotH = height - margin.top - margin.bottom;
+
+  const k = kdjData.k || kdjData.K || [];
+  const d = kdjData.d || kdjData.D || [];
+  const j = kdjData.j || kdjData.J || [];
+
+  const allVals = [...k, ...d, ...j].filter((v) => v !== null);
+  if (!allVals.length) return `<svg width="${width}" height="${height}"><text x="10" y="60" fill="#7d8590">KDJ 数据不可用</text></svg>`;
+
+  const maxV = Math.max(...allVals, 100);
+  const minV = Math.min(...allVals, 0);
+  const range = Math.max(maxV - minV, 0.001);
+  const step = plotW / Math.max(k.length - 1, 1);
+  const lineY = (v) => margin.top + ((maxV - v) / range) * plotH;
+
+  function makePath(values, color) {
+    const points = values.map((v, i) => {
+      const y = lineY(v);
+      if (v === null) return null;
+      return `${i === 0 ? "M" : "L"} ${(margin.left + step * i).toFixed(1)} ${y.toFixed(1)}`;
+    }).filter(Boolean).join(" ");
+    return points ? `<path d="${points}" fill="none" stroke="${color}" stroke-width="1.5" />` : "";
+  }
+
+  return `
+  <svg width="${width}" height="${height}" role="img" aria-label="KDJ indicator">
+    <line x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${margin.top + plotH}" stroke="rgba(48,54,61,0.4)" />
+    <line x1="${margin.left}" y1="${lineY(80)}" x2="${width - margin.right}" y2="${lineY(80)}" stroke="rgba(48,54,61,0.3)" stroke-dasharray="3 4" />
+    <line x1="${margin.left}" y1="${lineY(20)}" x2="${width - margin.right}" y2="${lineY(20)}" stroke="rgba(48,54,61,0.3)" stroke-dasharray="3 4" />
+    ${makePath(k, "#f0883e")}
+    ${makePath(d, "#58a6ff")}
+    ${makePath(j, "#d2a8ff")}
+    <text x="${margin.left + 4}" y="${margin.top + 12}" fill="#f0883e" font-size="11">K</text>
+    <text x="${margin.left + 18}" y="${margin.top + 12}" fill="#58a6ff" font-size="11">D</text>
+    <text x="${margin.left + 34}" y="${margin.top + 12}" fill="#d2a8ff" font-size="11">J</text>
+  </svg>`;
+}
+
+function renderBOLLSVG(bollData, bars) {
+  // bollData: { upper: [], middle: [], lower: [] } or [upper, middle, lower] arrays
+  const width = 960;
+  const height = 140;
+  const margin = { top: 10, right: 18, bottom: 24, left: 18 };
+  const plotW = width - margin.left - margin.right;
+  const plotH = height - margin.top - margin.bottom;
+
+  const upper = Array.isArray(bollData) ? bollData[0] : (bollData.upper || []);
+  const middle = Array.isArray(bollData) ? bollData[1] : (bollData.middle || []);
+  const lower = Array.isArray(bollData) ? bollData[2] : (bollData.lower || []);
+
+  const allVals = [...upper, ...middle, ...lower].filter((v) => v !== null);
+  if (!allVals.length) return `<svg width="${width}" height="${height}"><text x="10" y="60" fill="#7d8590">BOLL 数据不可用</text></svg>`;
+
+  const maxV = Math.max(...allVals);
+  const minV = Math.min(...allVals);
+  const range = Math.max(maxV - minV, 0.001);
+  const step = plotW / Math.max(upper.length - 1, 1);
+  const priceY = (v) => margin.top + ((maxV - v) / range) * plotH;
+
+  function makeLine(values, color) {
+    const points = values.map((v, i) => {
+      const y = priceY(v);
+      if (v === null) return null;
+      return `${i === 0 ? "M" : "L"} ${(margin.left + step * i).toFixed(1)} ${y.toFixed(1)}`;
+    }).filter(Boolean).join(" ");
+    return points ? `<path d="${points}" fill="none" stroke="${color}" stroke-width="1.5" stroke-dasharray="${color === '#d2a8ff' ? '4 3' : 'none'}" />` : "";
+  }
+
+  // Area between upper and lower
+  const areaPath = (() => {
+    const upPts = upper.map((v, i) => ({ x: margin.left + step * i, y: priceY(v) })).filter((p) => p.y !== null);
+    const lowPts = lower.map((v, i) => ({ x: margin.left + step * i, y: priceY(v) })).filter((p) => p.y !== null);
+    if (!upPts.length || !lowPts.length) return "";
+    let d = `M ${upPts[0].x.toFixed(1)} ${upPts[0].y.toFixed(1)}`;
+    upPts.forEach((p) => { d += ` L ${p.x.toFixed(1)} ${p.y.toFixed(1)}`; });
+    for (let i = lowPts.length - 1; i >= 0; i--) {
+      d += ` L ${lowPts[i].x.toFixed(1)} ${lowPts[i].y.toFixed(1)}`;
+    }
+    d += " Z";
+    return `<path d="${d}" fill="rgba(210,168,255,0.06)" />`;
+  })();
+
+  return `
+  <svg width="${width}" height="${height}" role="img" aria-label="BOLL indicator">
+    ${areaPath}
+    ${makeLine(upper, "#f85149")}
+    ${makeLine(middle, "#f0883e")}
+    ${makeLine(lower, "#f85149")}
+    <text x="${margin.left + 4}" y="${margin.top + 12}" fill="#f85149" font-size="11">上轨</text>
+    <text x="${margin.left + 44}" y="${margin.top + 12}" fill="#f0883e" font-size="11">中轨</text>
+    <text x="${margin.left + 80}" y="${margin.top + 12}" fill="#f85149" font-size="11">下轨</text>
+  </svg>`;
+}
+
+/* ── Intraday / 分时图 (CHART-04) ─────────────────────────────── */
+function renderIntradayChart(payload) {
+  const card = document.getElementById("kline-card");
+  const status = document.getElementById("chart-status");
+  const bars = payload.bars || [];
+  if (!bars.length) {
+    renderEmptyHistory("kline-card", "chart-status", "当前标的没有可展示的分时数据。", "分时数据需要先完成分钟级行情采集");
+    return;
+  }
+  const width = 980;
+  const height = 420;
+  const margin = { top: 22, right: 18, bottom: 38, left: 18 };
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  const volumeHeight = plotHeight * 0.22;
+  const pricePlotHeight = plotHeight - volumeHeight - 14;
+
+  const closes = bars.map((b) => b.close);
+  const maxPrice = Math.max(...closes);
+  const minPrice = Math.min(...closes);
+  const priceRange = Math.max(maxPrice - minPrice, 0.01);
+  const maxVolume = Math.max(...bars.map((b) => b.volume || 0), 1);
+
+  // Compute a reference line: use the first bar's close as "yesterday close"
+  const refPrice = bars[0] ? bars[0].close : (maxPrice + minPrice) / 2;
+  const refY = margin.top + ((maxPrice - refPrice) / priceRange) * pricePlotHeight;
+
+  const step = plotWidth / Math.max(bars.length - 1, 1);
+  const priceY = (p) => margin.top + ((maxPrice - p) / priceRange) * pricePlotHeight;
+  const volumeY = (v) => margin.top + pricePlotHeight + 14 + (1 - v / maxVolume) * volumeHeight;
+
+  // Main price line
+  const pricePath = bars
+    .map((bar, i) => {
+      const x = margin.left + step * i;
+      const y = priceY(bar.close);
+      return `${i === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+    })
+    .join(" ");
+
+  // Filled area under the line (gradient)
+  const lastX = margin.left + step * (bars.length - 1);
+  const areaPath =
+    pricePath +
+    ` L ${lastX.toFixed(2)} ${(margin.top + pricePlotHeight).toFixed(2)}` +
+    ` L ${margin.left} ${(margin.top + pricePlotHeight).toFixed(2)} Z`;
+
+  // Determine if price is above or below reference for coloring
+  const lastClose = bars[bars.length - 1] ? bars[bars.length - 1].close : refPrice;
+  const isUp = lastClose >= refPrice;
+  const lineColor = isUp ? "#3fb950" : "#f85149";
+  const areaColor = isUp ? "rgba(63,185,80,0.08)" : "rgba(248,81,73,0.08)";
+
+  // Volume bars colored by up/down
+  const volumeBars = bars
+    .map((bar, i) => {
+      const x = margin.left + step * i + Math.max(step * 0.1, 1);
+      const barW = Math.max(step * 0.8, 2);
+      const y = volumeY(bar.volume || 0);
+      const h = margin.top + pricePlotHeight + 14 + volumeHeight - y;
+      const color = bar.close >= bar.open ? "rgba(63,185,80,0.4)" : "rgba(248,81,73,0.4)";
+      return `<rect x="${x}" y="${y}" width="${barW}" height="${Math.max(h, 1)}" fill="${color}" rx="1" />`;
+    })
+    .join("");
+
+  // Grid lines
+  const gridLines = [0, 0.25, 0.5, 0.75, 1]
+    .map((ratio) => {
+      const y = margin.top + pricePlotHeight * ratio;
+      return `<line x1="${margin.left}" y1="${y}" x2="${width - margin.right}" y2="${y}" stroke="rgba(48,54,61,0.4)" stroke-dasharray="3 6" />`;
+    })
+    .join("");
+
+  // Reference price line (yesterday close)
+  const refLabel = `${formatNumber(refPrice)}`;
+  const refLabelX = width - margin.right - 4;
+
+  // Y-axis price labels
+  const priceLabels = [maxPrice, (maxPrice + minPrice) / 2, minPrice].map((p, i) => {
+    const y = margin.top + (pricePlotHeight / 2) * i * (i === 0 ? 0 : i === 2 ? 2 : 1);
+    return `<text x="${refLabelX}" y="${y + 4}" fill="#7d8590" font-size="12" text-anchor="end">${formatNumber(p)}</text>`;
+  }).join("");
+
+  // Time labels (show at start, middle, end)
+  const timeLabels = (() => {
+    const times = [0, Math.floor(bars.length / 2), bars.length - 1]
+      .map((i) => {
+        const bar = bars[i];
+        if (!bar || !bar.bar_time) return "";
+        const x = margin.left + step * i;
+        // Extract HH:MM from ISO timestamp
+        const label = bar.bar_time.includes("T") ? bar.bar_time.split("T")[1].substring(0, 5) : bar.bar_time.substring(0, 5);
+        return `<text x="${x}" y="${height - 10}" fill="#7d8590" font-size="12" text-anchor="middle">${label}</text>`;
+      });
+    return times.join("");
+  })();
+
+  // Change stats
+  const changeValue = lastClose - refPrice;
+  const changePct = refPrice > 0 ? (changeValue / refPrice) * 100 : 0;
+  const changeClass = isUp ? "metric-positive" : "metric-negative";
+  const changeSign = changeValue >= 0 ? "+" : "";
+
+  status.textContent = `${payload.symbol} 分时走势 · ${bars.length} 分钟`;
+  card.className = "kline-card";
+  card.innerHTML = `
+    <div class="kline-summary">
+      <span class="kline-stat">分时最新 ${formatNumber(lastClose)}</span>
+      <span class="kline-stat ${changeClass}">涨跌额 ${changeSign}${formatNumber(changeValue)}</span>
+      <span class="kline-stat ${changeClass}">涨跌幅 ${changeSign}${formatNumber(changePct)}%</span>
+      <span class="kline-stat">昨收 ${formatNumber(refPrice)}</span>
+      <span class="kline-stat">最高 ${formatNumber(maxPrice)}</span>
+      <span class="kline-stat">最低 ${formatNumber(minPrice)}</span>
+    </div>
+    <svg class="kline-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${payload.symbol} intraday chart">
+      <rect x="0" y="0" width="${width}" height="${height}" fill="transparent"></rect>
+      ${gridLines}
+      <line x1="${margin.left}" y1="${margin.top + pricePlotHeight}" x2="${width - margin.right}" y2="${margin.top + pricePlotHeight}" stroke="rgba(48,54,61,0.6)" />
+      <line x1="${margin.left}" y1="${margin.top + pricePlotHeight + 14}" x2="${width - margin.right}" y2="${margin.top + pricePlotHeight + 14}" stroke="rgba(48,54,61,0.4)" />
+      ${volumeBars}
+      <path d="${areaPath}" fill="${areaColor}" />
+      <path d="${pricePath}" fill="none" stroke="${lineColor}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+      <line x1="${margin.left}" y1="${refY}" x2="${width - margin.right}" y2="${refY}" stroke="rgba(240,136,62,0.7)" stroke-width="1.2" stroke-dasharray="4 4" />
+      <text x="${refLabelX - 4}" y="${refY - 4}" fill="#f0883e" font-size="11" text-anchor="end">昨收 ${refLabel}</text>
+      ${priceLabels}
+      ${timeLabels}
+    </svg>
+  `;
 }
 
 function renderCryptoChart(payload) {
@@ -1495,9 +1967,63 @@ function paperOrderStatusBadge(status) {
   return `<span class="status-pill status-${status || "not_started"}">${status || "-"}</span>`;
 }
 
+/* ── Strategy Running Monitor (策略运行监控) ───────────────────────────── */
+function renderStrategyMonitor() {
+  const container = document.getElementById("strategy-monitor");
+  if (!container) return;
+  const runningBots = (state.bots || []).filter((b) => b.status === "running" || b.status === "paused");
+  if (!runningBots.length) {
+    container.innerHTML = "";
+    return;
+  }
+  container.innerHTML = runningBots
+    .map((bot) => {
+      const metrics = bot.metrics || {};
+      const pnl = Number(metrics.pnl || 0);
+      const ordersCount = Number(metrics.orders_count || bot.orders_count || 0);
+      const lastSignal = bot.last_signal || {};
+      const targetWeight = Number(lastSignal.target_weight || 0);
+      const statusLabel = bot.status === "running" ? "运行中" : "已暂停";
+      const statusClass = bot.status;
+      const pnlClass = pnl >= 0 ? "metric-positive" : "metric-negative";
+      const startedAt = bot.started_at ? formatTime(bot.started_at) : "-";
+      return `
+        <div class="strategy-monitor-card ${statusClass}">
+          <div class="strategy-monitor-head">
+            <h4>${bot.bot_name || bot.template_name || "策略"}</h4>
+            ${botStatusBadge(bot.status)}
+          </div>
+          <p style="font-size:11px;color:var(--muted);margin:0;">${bot.symbol || ""} · ${bot.template_name || ""}</p>
+          <div class="strategy-monitor-metrics">
+            <div class="strategy-monitor-metric">
+              <span>累计盈亏</span>
+              <strong class="${pnlClass}">${formatNumber(pnl)}</strong>
+            </div>
+            <div class="strategy-monitor-metric">
+              <span>目标权重</span>
+              <strong>${formatNumber(targetWeight * 100)}%</strong>
+            </div>
+            <div class="strategy-monitor-metric">
+              <span>订单数</span>
+              <strong>${formatNumber(ordersCount)}</strong>
+            </div>
+          </div>
+          <p style="font-size:11px;color:var(--muted);margin:6px 0 0;">启动: ${startedAt}</p>
+          <div class="strategy-monitor-actions">
+            ${bot.status === "running" ? `<button class="ghost-button" type="button" data-bot-action="pause" data-bot-id="${bot.bot_id}" style="font-size:12px;padding:4px 8px">暂停</button>` : ""}
+            ${bot.status === "paused" ? `<button class="ghost-button" type="button" data-bot-action="start" data-bot-id="${bot.bot_id}" style="font-size:12px;padding:4px 8px">启动</button>` : ""}
+            <button class="ghost-button" type="button" data-bot-action="stop" data-bot-id="${bot.bot_id}" style="font-size:12px;padding:4px 8px">停止</button>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
 function renderPaperDashboard(payload) {
   state.paperDashboard = payload;
   renderPaperInstrumentHint();
+  renderStrategyMonitor();
   const overview = document.getElementById("paper-account-overview");
   const positions = document.getElementById("paper-positions");
   const orders = document.getElementById("paper-orders");
@@ -2560,6 +3086,43 @@ function renderChartControls() {
       `
     )
     .join("");
+  const INDICATORS = [
+    { value: "MACD", label: "MACD" },
+    { value: "KDJ", label: "KDJ" },
+    { value: "BOLL", label: "BOLL" },
+  ];
+  document.getElementById("chart-indicator-buttons").innerHTML = INDICATORS
+    .map(
+      (ind) => `
+        <button type="button" class="mode-button ${state.activeIndicator === ind.value ? "is-active" : ""}" data-indicator="${ind.value}">
+          ${ind.label}
+        </button>
+      `
+    )
+    .join("");
+  // CHART-01: Drawing tool buttons (trendline / fibonacci)
+  const DRAWING_TOOLS = [
+    { value: "trendline", label: "趋势线" },
+    { value: "fibonacci", label: "斐波那契" },
+  ];
+  let drawingHtml = `<div style="display:flex;gap:4px;align-items:center;margin-left:8px;border-left:1px solid rgba(255,255,255,0.1);padding-left:8px;">`;
+  if (state.chartDrawingMode) {
+    drawingHtml += `<button type="button" class="mode-button is-active" id="chart-drawing-clear" data-chart-drawing="clear" title="清除所有绘制">清除</button>`;
+  }
+  drawingHtml += DRAWING_TOOLS
+    .map(
+      (tool) => `
+        <button type="button" class="mode-button ${state.chartDrawingMode === tool.value ? "is-active" : ""}" data-chart-drawing="${tool.value}" title="${tool.label}">
+          ${tool.label}
+        </button>
+      `
+    )
+    .join("");
+  drawingHtml += `</div>`;
+  const indContainer = document.getElementById("chart-indicator-buttons");
+  if (indContainer) {
+    indContainer.insertAdjacentHTML("afterend", drawingHtml);
+  }
 }
 
 function updateMarketFeedStatus(snapshot, message = null) {
@@ -2745,8 +3308,12 @@ async function setActiveTab(tab, { persist = false, log = false } = {}) {
   if (state.activeTab === "paper") {
     await loadPaperDashboardSafely();
   }
+  if (state.activeTab === "watchlist") {
+    loadWatchlistGroups().then(renderWatchlistGroups);
+  }
   if (state.activeTab === "downloads") {
     renderRiskDashboard();
+    loadAlertHistory().then(renderAlertHistory);
   }
   updateMarketFeedStatus(state.marketSnapshot);
   if (persist) {
@@ -2885,6 +3452,161 @@ async function loadNotifications() {
   renderNotifications();
 }
 
+/* ── Alert History (MO-06) ─────────────────────────────────────────────── */
+async function loadAlertHistory() {
+  const payload = await fetchJson("/api/alerts/history?window_hours=168&severity=");
+  if (payload.code !== "OK") return [];
+  return payload.data || [];
+}
+
+function renderAlertHistory(alerts) {
+  const container = document.getElementById("alert-history-list");
+  if (!container) return;
+  if (!alerts || alerts.length === 0) {
+    container.innerHTML = '<div class="empty-state">暂无告警记录</div>';
+    return;
+  }
+  const severityColors = { INFO: "#3fb950", WARNING: "#d29922", CRITICAL: "#f85149", EMERGENCY: "#ff7b72" };
+  container.innerHTML = alerts.map(a => `
+    <div class="activity-item">
+      <strong style="color:${severityColors[a.severity] || '#e6edf3'}">[${a.severity}] ${a.code}</strong>
+      <p>${a.message}</p>
+      <p>${a.timestamp ? formatTime(a.timestamp) : '-'}</p>
+    </div>
+  `).join("");
+}
+
+/* ── Report Display (RP-05/06) ───────────────────────────────────────── */
+async function loadDailyReport() {
+  const payload = await fetchJson("/api/reports/daily?account_id=paper_stock_main");
+  if (payload.code !== "OK") return null;
+  return payload.data;
+}
+
+async function loadWeeklyReport() {
+  const payload = await fetchJson("/api/reports/weekly?account_id=paper_stock_main");
+  if (payload.code !== "OK") return null;
+  return payload.data;
+}
+
+async function loadMonthlyReport() {
+  const payload = await fetchJson("/api/reports/monthly?account_id=paper_stock_main");
+  if (payload.code !== "OK") return null;
+  return payload.data;
+}
+
+function renderReportSummary(report, type) {
+  if (!report) return '<div class="empty-state">暂无报告数据</div>';
+  const acct = report.account_summary || {};
+  const risk = report.risk_alerts || {};
+  return `
+    <div class="report-section">
+      <h4>${type === 'daily' ? '日报' : type === 'weekly' ? '周报' : '月报'}</h4>
+      <p>报告日期: ${report.report_date || '-'}</p>
+      <p>账户: ${report.account_id || '-'}</p>
+      <div class="report-metrics">
+        <div class="f10-metric"><span>权益</span><strong>${formatNumber(acct.equity || 0)}</strong></div>
+        <div class="f10-metric"><span>现金</span><strong>${formatNumber(acct.cash || 0)}</strong></div>
+        <div class="f10-metric"><span>多头空仓</span><strong>${formatNumber(acct.gross_exposure || 0)}</strong></div>
+        <div class="f10-metric"><span>净多头</span><strong>${formatNumber(acct.net_exposure || 0)}</strong></div>
+      </div>
+      <div class="report-metrics">
+        <div class="f10-metric"><span>总交易</span><strong>${risk.total_trades || 0}</strong></div>
+        <div class="f10-metric"><span>告警数</span><strong>${risk.total_alerts || 0}</strong></div>
+        <div class="f10-metric"><span>严重告警</span><strong style="color:#f85149">${risk.critical_alerts || 0}</strong></div>
+      </div>
+    </div>
+  `;
+}
+
+/* ── Orderbook from API ───────────────────────────────────────────────── */
+async function loadOrderbook(instrumentId) {
+  if (!instrumentId) return null;
+  const payload = await fetchJson(`/api/orderbook?instrument_id=${encodeURIComponent(instrumentId)}`);
+  if (payload.code !== "OK") return null;
+  return payload.data;
+}
+
+async function loadTradeTicks(instrumentId, limit = 20) {
+  if (!instrumentId) return [];
+  const payload = await fetchJson(`/api/trade-ticks?instrument_id=${encodeURIComponent(instrumentId)}&limit=${limit}`);
+  if (payload.code !== "OK") return [];
+  return payload.data || [];
+}
+
+async function refreshOrderbookAndTicks() {
+  const instrumentId = state.activeInstrumentId;
+  if (!instrumentId) return;
+  const ob = await loadOrderbook(instrumentId);
+  if (ob && (ob.bids || ob.asks)) {
+    renderOrderbookFromAPI(ob);
+  }
+  const ticks = await loadTradeTicks(instrumentId);
+  if (ticks && ticks.length > 0) {
+    renderTradeTicksFromAPI(ticks);
+  }
+}
+
+function renderOrderbookFromAPI(ob) {
+  const asksEl = document.getElementById("orderbook-asks");
+  const bidsEl = document.getElementById("orderbook-bids");
+  const midEl = document.getElementById("orderbook-mid-price");
+  if (!asksEl || !bidsEl || !midEl) return;
+  const asks = (ob.asks || []).slice(0, 5).reverse();
+  const bids = (ob.bids || []).slice(0, 5);
+  asksEl.innerHTML = asks.map((a, i) => `<tr><td class="ob-label">卖${5-i}</td><td class="ob-price ob-ask">${formatNumber(a[0])}</td><td class="ob-vol">${a[1]}</td></tr>`).join("");
+  bidsEl.innerHTML = bids.map((b, i) => `<tr><td class="ob-label">买${i+1}</td><td class="ob-price ob-bid">${formatNumber(b[0])}</td><td class="ob-vol">${b[1]}</td></tr>`).join("");
+  const mid = bids[0] && asks[0] ? ((bids[0][0] + asks[0][0]) / 2) : (bids[0] ? bids[0][0] : asks[0] ? asks[0][0] : 0);
+  midEl.innerHTML = `<strong style="color:var(--accent);font-size:16px">${formatNumber(mid)}</strong>`;
+}
+
+function renderTradeTicksFromAPI(ticks) {
+  const ticksEl = document.getElementById("stock-trade-ticks");
+  if (!ticksEl) return;
+  ticksEl.innerHTML = '<div class="tick-header"><span>时间</span><span>成交价</span><span>现手</span><span>性质</span></div>' +
+    ticks.map(t => {
+      const side = t.side === "buy" || t.side === "BUY" ? "买入" : "卖出";
+      const sColor = side === "买入" ? "var(--up)" : "var(--down)";
+      return `<div class="tick-row"><span>${t.timestamp ? formatTime(t.timestamp) : '-'}</span><span style="color:${sColor}">${formatNumber(t.price)}</span><span>${t.quantity}</span><span style="color:${sColor}">${side}</span></div>`;
+    }).join("");
+}
+
+/* ── Watchlist Grouping ───────────────────────────────────────────────── */
+async function loadWatchlistGroups() {
+  const payload = await fetchJson("/api/watchlist/groups");
+  if (payload.code !== "OK") return [];
+  return payload.data || [];
+}
+
+async function createWatchlistGroup(groupName) {
+  const payload = await postJson("/api/watchlist/groups", { group_name: groupName });
+  if (payload.code !== "OK") return null;
+  return payload.data;
+}
+
+async function addToWatchlistGroup(groupName, instrumentId) {
+  const payload = await postJson("/api/watchlist/group/add", {
+    group_name: groupName,
+    instrument_id: instrumentId,
+  });
+  return payload.code === "OK";
+}
+
+function renderWatchlistGroups(groups) {
+  const container = document.getElementById("watchlist-groups");
+  if (!container) return;
+  if (!groups || groups.length === 0) {
+    container.innerHTML = '<div class="empty-state">暂无自定义分组</div>';
+    return;
+  }
+  container.innerHTML = groups.map(g => `
+    <div class="watchlist-group-item">
+      <strong>${g.group_name}</strong>
+      <span>${(g.instruments || []).length} 只股票</span>
+    </div>
+  `).join("");
+}
+
 async function refreshBotConsole() {
   await loadBots();
   await loadNotifications();
@@ -3005,10 +3727,17 @@ async function loadCompare({ persist = false, eventPayload = null } = {}) {
 }
 
 async function loadKlines(instrumentId) {
+  renderChartControls();
+  if (state.chartMode === "intraday") {
+    const payload = await fetchJson(
+      `/api/stocks/minutes?instrument_id=${encodeURIComponent(instrumentId)}&limit=240`
+    );
+    renderIntradayChart(payload.data);
+    return;
+  }
   const payload = await fetchJson(
     `/api/stocks/klines?instrument_id=${encodeURIComponent(instrumentId)}&limit=${encodeURIComponent(state.chartRange)}`
   );
-  renderChartControls();
   renderKlineChart(payload.data);
 }
 
@@ -3334,6 +4063,9 @@ function applyWorkspaceState(workspace) {
   state.sortDesc = !!((saved.sort || {}).sort_desc);
   state.chartRange = Number((saved.chart || {}).range || 120);
   state.chartMode = (saved.chart || {}).mode || "candles";
+  state.activeIndicator = (saved.chart || {}).indicator || null;
+  state.chartDrawingMode = (saved.chart || {}).drawingMode || null;
+  state.chartDrawings = Array.isArray((saved.chart || {}).drawings) ? (saved.chart || {}).drawings : [];
   state.activeCryptoInstrumentId = ((saved.crypto || {}).active_instrument_id) || "BTCUSDT";
   state.cryptoChartRange = Number((((saved.crypto || {}).chart || {}).range) || 120);
   state.cryptoChartMode = (((saved.crypto || {}).chart || {}).mode) || "candles";
@@ -3474,6 +4206,34 @@ document.addEventListener("click", async (event) => {
       await saveWorkspace();
       await logEvent("change_chart_view", { range: state.chartRange, mode: state.chartMode });
       await loadActivity();
+    }
+    return;
+  }
+
+  const indicatorButton = event.target.closest("[data-indicator]");
+  if (indicatorButton) {
+    const ind = indicatorButton.dataset.indicator;
+    state.activeIndicator = state.activeIndicator === ind ? null : ind;
+    renderChartControls();
+    if (state.activeInstrumentId) {
+      await loadKlines(state.activeInstrumentId);
+    }
+    return;
+  }
+
+  // CHART-01: Drawing tool buttons
+  const drawingButton = event.target.closest("[data-chart-drawing]");
+  if (drawingButton) {
+    const tool = drawingButton.dataset.chartDrawing;
+    if (tool === "clear") {
+      state.chartDrawings = [];
+      state.chartDrawingMode = null;
+    } else {
+      state.chartDrawingMode = state.chartDrawingMode === tool ? null : tool;
+    }
+    renderChartControls();
+    if (state.activeInstrumentId) {
+      await loadKlines(state.activeInstrumentId);
     }
     return;
   }
@@ -3651,6 +4411,35 @@ document.getElementById("paper-reset").addEventListener("click", async () => {
   await resetPaperAccount();
 });
 
+document.getElementById("report-daily-btn").addEventListener("click", async () => {
+  const report = await loadDailyReport();
+  const el = document.getElementById("report-display");
+  if (el) el.innerHTML = renderReportSummary(report, "daily");
+});
+
+document.getElementById("report-weekly-btn").addEventListener("click", async () => {
+  const report = await loadWeeklyReport();
+  const el = document.getElementById("report-display");
+  if (el) el.innerHTML = renderReportSummary(report, "weekly");
+});
+
+document.getElementById("report-monthly-btn").addEventListener("click", async () => {
+  const report = await loadMonthlyReport();
+  const el = document.getElementById("report-display");
+  if (el) el.innerHTML = renderReportSummary(report, "monthly");
+});
+
+document.getElementById("create-watchlist-group-btn").addEventListener("click", async () => {
+  const input = document.getElementById("new-watchlist-group-name");
+  if (!input || !input.value.trim()) return;
+  const group = await createWatchlistGroup(input.value.trim());
+  if (group) {
+    input.value = "";
+    const groups = await loadWatchlistGroups();
+    renderWatchlistGroups(groups);
+  }
+});
+
 document.getElementById("paper-order-type").addEventListener("change", () => {
   renderPaperOrderTypeState();
 });
@@ -3695,6 +4484,48 @@ document.getElementById("bot-create-form").addEventListener("submit", async (eve
   await setActiveTab("activity");
   await createBotFromSelection();
 });
+
+/* ── SSE (Server-Sent Events) for Real-time Updates ─────────────────── */
+let _sseSource = null;
+
+function initSSE() {
+  if (_sseSource) {
+    _sseSource.close();
+  }
+  const clientId = state.clientId || "anonymous";
+  _sseSource = new EventSource(`/api/events/stream?client_id=${encodeURIComponent(clientId)}`);
+  _sseSource.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.type === "connected") {
+        console.log("SSE connected:", data.client_id);
+        return;
+      }
+      if (data.type === "bot_state_changed" || data.type === "bot_list_changed") {
+        // Refresh bot console when any bot state changes
+        refreshBotConsole();
+        if (state.activeTab === "activity") {
+          loadActivity();
+        }
+        return;
+      }
+      if (data.type === "paper_order_submitted") {
+        // Refresh paper dashboard when an order is submitted
+        loadPaperDashboardSafely({ silent: true });
+        return;
+      }
+    } catch (e) {
+      // Ignore parse errors
+    }
+  };
+  _sseSource.onerror = () => {
+    // EventSource will auto-reconnect; ignore errors silently
+    _sseSource.close();
+    _sseSource = null;
+    // Reconnect after 5 seconds
+    setTimeout(initSSE, 5000);
+  };
+}
 
 window.addEventListener("DOMContentLoaded", async () => {
   ensureClientId();
@@ -3743,6 +4574,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   renderRiskDashboard();
   scheduleRealtimePolling();
   scheduleDownloadPolling();
+  initSSE();
   await logEvent("open_page", { path: window.location.pathname });
   await loadActivity();
 });

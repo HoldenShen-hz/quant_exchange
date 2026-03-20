@@ -3,10 +3,74 @@
 from __future__ import annotations
 
 import json
+import threading
+import queue
 from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs
 from wsgiref.simple_server import make_server
+
+
+class SSEEventBroadcaster:
+    """Thread-safe SSE event broadcaster for real-time push to browser clients.
+
+    Clients subscribe with a client_id and receive events broadcast by the server.
+    Used to replace HTTP polling for bot state and dashboard updates.
+    """
+
+    def __init__(self) -> None:
+        self._clients: dict[str, queue.Queue] = {}
+        self._lock = threading.Lock()
+
+    def subscribe(self, client_id: str) -> queue.Queue:
+        """Register a new client and return its event queue."""
+        q: queue.Queue = queue.Queue(maxsize=16)
+        with self._lock:
+            self._clients[client_id] = q
+        return q
+
+    def unsubscribe(self, client_id: str) -> None:
+        """Remove a client from the broadcaster."""
+        with self._lock:
+            self._clients.pop(client_id, None)
+
+    def broadcast(self, event: dict) -> None:
+        """Push an event to all connected clients (non-blocking)."""
+        with self._lock:
+            clients = list(self._clients.items())
+        for client_id, q in clients:
+            try:
+                q.put_nowait(event)
+            except queue.Full:
+                # Drop event if client queue is full (slow consumer)
+                pass
+
+    @property
+    def client_count(self) -> int:
+        """Return the number of connected clients."""
+        with self._lock:
+            return len(self._clients)
+
+
+class _SSEResponse:
+    """Wrapper to make a generator behave as a WSGI iterable with proper cleanup."""
+
+    def __init__(self, gen) -> None:
+        self._gen = gen
+        self._started = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if not self._started:
+            self._started = True
+        return next(self._gen)
+
+    def close(self):
+        """Called by WSGI server when response is complete."""
+        if hasattr(self._gen, "close"):
+            self._gen.close()
 
 
 class StockScreenerWebApp:
@@ -246,17 +310,17 @@ class StockScreenerWebApp:
                     {"code": "BAD_REQUEST", "error": {"message": "instrument_id, side and quantity are required."}},
                     status="400 Bad Request",
                 )
-            return self._json(
-                start_response,
-                self.platform.api.submit_paper_order(
-                    instrument_id=instrument_id,
-                    side=side,
-                    quantity=float(quantity),
-                    account_code=payload.get("account_code") or self._paper_account_code(actor),
-                    order_type=payload.get("order_type", "market"),
-                    limit_price=payload.get("limit_price"),
-                ),
+            result = self.platform.api.submit_paper_order(
+                instrument_id=instrument_id,
+                side=side,
+                quantity=float(quantity),
+                account_code=payload.get("account_code") or self._paper_account_code(actor),
+                order_type=payload.get("order_type", "market"),
+                limit_price=payload.get("limit_price"),
             )
+            if result.get("code") == "OK":
+                self._broadcast_sse({"type": "paper_order_submitted"})
+            return self._json(start_response, result)
         if path == "/api/paper/orders/cancel" and method == "POST":
             payload = self._read_json(environ)
             actor = self._web_actor(environ, payload=payload, allow_anonymous=True)
@@ -297,16 +361,16 @@ class StockScreenerWebApp:
                     {"code": "BAD_REQUEST", "error": {"message": "template_code and instrument_id are required."}},
                     status="400 Bad Request",
                 )
-            return self._json(
-                start_response,
-                self.platform.api.create_strategy_bot(
-                    template_code=template_code,
-                    instrument_id=instrument_id,
-                    bot_name=payload.get("bot_name"),
-                    mode=payload.get("mode", "paper"),
-                    params=payload.get("params"),
-                ),
+            result = self.platform.api.create_strategy_bot(
+                template_code=template_code,
+                instrument_id=instrument_id,
+                bot_name=payload.get("bot_name"),
+                mode=payload.get("mode", "paper"),
+                params=payload.get("params"),
             )
+            if result.get("code") == "OK":
+                self._broadcast_sse({"type": "bot_list_changed"})
+            return self._json(start_response, result)
         if path == "/api/bots/start" and method == "POST":
             payload = self._read_json(environ)
             bot_id = payload.get("bot_id", "")
@@ -316,7 +380,9 @@ class StockScreenerWebApp:
                     {"code": "BAD_REQUEST", "error": {"message": "bot_id is required."}},
                     status="400 Bad Request",
                 )
-            return self._json(start_response, self.platform.api.start_strategy_bot(bot_id))
+            result = self.platform.api.start_strategy_bot(bot_id)
+            self._broadcast_sse({"type": "bot_state_changed", "bot_id": bot_id, "action": "started"})
+            return self._json(start_response, result)
         if path == "/api/bots/pause" and method == "POST":
             payload = self._read_json(environ)
             bot_id = payload.get("bot_id", "")
@@ -326,7 +392,9 @@ class StockScreenerWebApp:
                     {"code": "BAD_REQUEST", "error": {"message": "bot_id is required."}},
                     status="400 Bad Request",
                 )
-            return self._json(start_response, self.platform.api.pause_strategy_bot(bot_id))
+            result = self.platform.api.pause_strategy_bot(bot_id)
+            self._broadcast_sse({"type": "bot_state_changed", "bot_id": bot_id, "action": "paused"})
+            return self._json(start_response, result)
         if path == "/api/bots/stop" and method == "POST":
             payload = self._read_json(environ)
             bot_id = payload.get("bot_id", "")
@@ -336,7 +404,9 @@ class StockScreenerWebApp:
                     {"code": "BAD_REQUEST", "error": {"message": "bot_id is required."}},
                     status="400 Bad Request",
                 )
-            return self._json(start_response, self.platform.api.stop_strategy_bot(bot_id))
+            result = self.platform.api.stop_strategy_bot(bot_id)
+            self._broadcast_sse({"type": "bot_state_changed", "bot_id": bot_id, "action": "stopped"})
+            return self._json(start_response, result)
         if path == "/api/bots/interact" and method == "POST":
             payload = self._read_json(environ)
             bot_id = payload.get("bot_id", "")
@@ -659,9 +729,137 @@ class StockScreenerWebApp:
                     amount=float(payload.get("amount", 0)),
                 ),
             )
+        # ── Market Data APIs ──────────────────────────────
+        if path == "/api/orderbook" and method == "GET":
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            instrument_id = query.get("instrument_id", [""])[0]
+            if not instrument_id:
+                return self._json(start_response, {"code": "BAD_REQUEST", "error": {"message": "instrument_id is required."}}, status="400 Bad Request")
+            return self._json(start_response, self.platform.api.get_orderbook(instrument_id))
+        if path == "/api/trade-ticks" and method == "GET":
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            instrument_id = query.get("instrument_id", [""])[0]
+            limit = int(query.get("limit", ["50"])[0])
+            if not instrument_id:
+                return self._json(start_response, {"code": "BAD_REQUEST", "error": {"message": "instrument_id is required."}}, status="400 Bad Request")
+            return self._json(start_response, self.platform.api.get_trade_ticks(instrument_id, limit=limit))
+        # ── Alert History APIs (MO-06) ────────────────────
+        if path == "/api/alerts/history" and method == "GET":
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            window_hours = int(query.get("window_hours", ["24"])[0])
+            severity = query.get("severity", [None])[0]
+            return self._json(start_response, self.platform.api.get_alert_history(window_hours=window_hours, severity=severity))
+        # ── Report APIs (RP-05/06) ────────────────────────
+        if path == "/api/reports/daily" and method == "GET":
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            account_id = query.get("account_id", ["paper_stock_main"])[0]
+            return self._json(start_response, self.platform.api.get_daily_report(account_id=account_id))
+        if path == "/api/reports/weekly" and method == "GET":
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            account_id = query.get("account_id", ["paper_stock_main"])[0]
+            return self._json(start_response, self.platform.api.get_weekly_report(account_id=account_id))
+        if path == "/api/reports/monthly" and method == "GET":
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            account_id = query.get("account_id", ["paper_stock_main"])[0]
+            return self._json(start_response, self.platform.api.get_monthly_report(account_id=account_id))
+        # ── Watchlist Grouping APIs ────────────────────────
+        if path == "/api/watchlist/groups" and method == "GET":
+            actor = self._web_actor(environ, allow_anonymous=True)
+            user_id = actor["username"] or actor["principal_id"] if actor else "anonymous"
+            return self._json(start_response, self.platform.api.get_watchlist_groups(user_id))
+        if path == "/api/watchlist/groups" and method == "POST":
+            payload = self._read_json(environ)
+            actor = self._web_actor(environ, payload=payload, allow_anonymous=True)
+            user_id = actor["username"] or actor["principal_id"] if actor else "anonymous"
+            return self._json(start_response, self.platform.api.create_watchlist_group(user_id, payload.get("group_name", "默认分组")))
+        if path == "/api/watchlist/group/add" and method == "POST":
+            payload = self._read_json(environ)
+            actor = self._web_actor(environ, payload=payload, allow_anonymous=True)
+            user_id = actor["username"] or actor["principal_id"] if actor else "anonymous"
+            return self._json(start_response, self.platform.api.add_to_watchlist_group(
+                user_id=user_id,
+                group_name=payload.get("group_name", "默认分组"),
+                instrument_id=payload.get("instrument_id", ""),
+            ))
+        # ── Futures Trading APIs (FT-05) ──────────────────
+        if path == "/api/futures/order" and method == "POST":
+            payload = self._read_json(environ)
+            return self._json(start_response, self.platform.api.submit_futures_order(
+                instrument_id=payload.get("instrument_id", ""),
+                side=payload.get("side", "buy"),
+                quantity=int(payload.get("quantity", 1)),
+                order_type=payload.get("order_type", "market"),
+                limit_price=payload.get("limit_price"),
+            ))
+        if path == "/api/futures/positions" and method == "GET":
+            return self._json(start_response, self.platform.api.get_futures_positions())
+        # ── Technical Indicator APIs (CHART-02) ──────────
+        if path == "/api/indicators/calculate" and method == "POST":
+            payload = self._read_json(environ)
+            return self._json(start_response, self.platform.api.calculate_indicator(
+                indicator=payload.get("indicator", ""),
+                prices=payload.get("prices", []),
+                **payload.get("params", {}),
+            ))
+        # ── SSE Real-time Event Stream (WebSocket replacement) ──────────
+        if path == "/api/events/stream" and method == "GET":
+            return self._sse_stream(start_response)
         if method not in {"GET", "POST"}:
             return self._json(start_response, {"code": "METHOD_NOT_ALLOWED"}, status="405 Method Not Allowed")
         return self._json(start_response, {"code": "NOT_FOUND"}, status="404 Not Found")
+
+    def _sse_stream(self, start_response):
+        """Serve a Server-Sent Events stream for real-time updates."""
+        import json
+        import threading
+
+        # Get or create the broadcaster on the platform
+        broadcaster = getattr(self.platform, "_sse_broadcaster", None)
+        if broadcaster is None:
+            broadcaster = SSEEventBroadcaster()
+            self.platform._sse_broadcaster = broadcaster
+
+        client_id = self._client_id(self._make_environ_for_sse())
+        queue = broadcaster.subscribe(client_id)
+
+        def generate():
+            # Send initial connection event
+            yield f"data: {json.dumps({'type': 'connected', 'client_id': client_id})}\n\n"
+            try:
+                while True:
+                    # Wait for events with timeout (30s keepalive)
+                    event = queue.get(timeout=30)
+                    if event is None:
+                        # Keepalive
+                        yield f": keepalive\n\n"
+                    else:
+                        yield f"data: {json.dumps(event, default=str)}\n\n"
+            except Exception:
+                pass
+            finally:
+                broadcaster.unsubscribe(client_id)
+
+        start_response("200 OK", [
+            ("Content-Type", "text/event-stream; charset=utf-8"),
+            ("Cache-Control", "no-cache"),
+            ("Connection", "keep-alive"),
+            ("X-Accel-Buffering", "no"),
+        ])
+        return _SSEResponse(generate())
+
+    def _make_environ_for_sse(self):
+        """Create a minimal environ dict for SSE subscription."""
+        return {"PATH_INFO": "/", "QUERY_STRING": "", "HTTP_X_CLIENT_ID": ""}
+
+    def _broadcast_sse(self, event: dict) -> None:
+        """Push an event to all SSE clients if the broadcaster is available."""
+        broadcaster = getattr(self.platform, "_sse_broadcaster", None)
+        if broadcaster is not None:
+            broadcaster.broadcast(event)
+
+    def _broadcast_bot_state(self, bot_id: str, action: str) -> None:
+        """Broadcast a bot state change event to all SSE clients."""
+        self._broadcast_sse({"type": "bot_state_changed", "bot_id": bot_id, "action": action})
 
     def _parse_filters(self, environ) -> dict[str, str]:
         """Translate query-string values into stock screener filter keys."""

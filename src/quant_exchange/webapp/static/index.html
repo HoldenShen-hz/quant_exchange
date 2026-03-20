@@ -323,6 +323,18 @@
               </div>
             </section>
           </div>
+
+          <section class="panel">
+            <div class="section-head">
+              <h2>自选分组</h2>
+              <p>创建自定义分组来管理不同主题或策略的自选股</p>
+            </div>
+            <div class="head-actions">
+              <input id="new-watchlist-group-name" type="text" placeholder="新分组名称" style="width:160px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;" />
+              <button id="create-watchlist-group-btn" class="ghost-button" type="button">创建分组</button>
+            </div>
+            <div id="watchlist-groups" class="watchlist-list empty-state">正在加载分组...</div>
+          </section>
         </section>
 
         <section class="tab-panel" data-tab-panel="screener">
@@ -520,6 +532,7 @@
                   <div class="chart-controls">
                     <div id="chart-range-buttons" class="chip-row"></div>
                     <div id="chart-mode-buttons" class="chip-row"></div>
+                    <div id="chart-indicator-buttons" class="chip-row"></div>
                   </div>
                 </div>
                 <div id="kline-card" class="kline-card empty-state">
@@ -711,6 +724,8 @@
               </div>
             </div>
             <div id="paper-account-overview" class="paper-overview-grid"></div>
+            <!-- 策略运行监控 (Strategy Running Monitor) -->
+            <div id="strategy-monitor" class="strategy-monitor-grid"></div>
             <div class="paper-grid">
               <div id="paper-donut" class="paper-card" style="padding:14px;text-align:center;">
                 <div class="empty-state" style="min-height:120px">暂无持仓数据</div>
@@ -795,6 +810,21 @@
                 <div id="paper-orders" class="paper-list empty-state">当前还没有模拟订单。</div>
                 <div id="paper-fills" class="paper-list empty-state">当前还没有模拟成交。</div>
               </section>
+
+              <section class="paper-card">
+                <div class="section-head">
+                  <div>
+                    <h3>交易报告</h3>
+                    <p>查看日/周/月度交易绩效报告</p>
+                  </div>
+                  <div class="head-actions">
+                    <button id="report-daily-btn" class="ghost-button" type="button">日报</button>
+                    <button id="report-weekly-btn" class="ghost-button" type="button">周报</button>
+                    <button id="report-monthly-btn" class="ghost-button" type="button">月报</button>
+                  </div>
+                </div>
+                <div id="report-display" class="report-display empty-state">点击上方按钮查看对应报告</div>
+              </section>
             </div>
           </section>
         </section>
@@ -827,6 +857,14 @@
                 <p>无告警</p>
               </div>
             </div>
+          </section>
+
+          <section class="panel">
+            <div class="section-head">
+              <h2>告警历史</h2>
+              <p>最近 7 天的系统告警记录，按严重级别分类展示</p>
+            </div>
+            <div id="alert-history-list" class="activity-log empty-state">正在加载告警记录...</div>
           </section>
 
           <section class="download-hub-panel">

@@ -1174,6 +1174,79 @@ tbody tr.is-active {
   line-height: 1.6;
 }
 
+.strategy-monitor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.strategy-monitor-card {
+  padding: 12px 14px;
+  border-radius: 18px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--line);
+}
+
+.strategy-monitor-card.running {
+  border-color: rgba(63, 185, 80, 0.3);
+  background: rgba(63, 185, 80, 0.06);
+}
+
+.strategy-monitor-card.paused {
+  border-color: rgba(240, 136, 62, 0.3);
+  background: rgba(240, 136, 62, 0.06);
+}
+
+.strategy-monitor-card.stopped {
+  opacity: 0.6;
+}
+
+.strategy-monitor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.strategy-monitor-head h4 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.strategy-monitor-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.strategy-monitor-metric {
+  text-align: center;
+  padding: 6px 4px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.04);
+}
+
+.strategy-monitor-metric span {
+  display: block;
+  font-size: 10px;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+
+.strategy-monitor-metric strong {
+  font-size: 13px;
+}
+
+.strategy-monitor-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
 .paper-overview-grid {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -1886,6 +1959,7 @@ tbody tr.is-active {
   .bot-overview-grid,
   .bot-metrics-grid,
   .paper-overview-grid,
+  .strategy-monitor-grid,
   .learning-overview-grid,
   .learning-knowledge-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1938,6 +2012,7 @@ tbody tr.is-active {
   .bot-overview-grid,
   .bot-metrics-grid,
   .bot-param-grid,
+  .strategy-monitor-grid,
   .bot-create-grid,
   .paper-overview-grid,
   .paper-order-grid,

@@ -255,9 +255,22 @@ class StrategyBotService:
         self._save_bot(bot)
         return bot
 
-    def _strategy(self, bot: dict) -> MovingAverageSentimentStrategy:
+    def _strategy(self, bot: dict):
         """Build a concrete strategy instance from one bot payload."""
 
+        engine = bot.get("engine_code", "MovingAverageSentimentStrategy")
+        if engine == "MovingAverageSentimentStrategy":
+            return MovingAverageSentimentStrategy(strategy_id=bot["template_code"], params=bot["params"])
+        elif engine == "GridTradingStrategy":
+            from quant_exchange.strategy.grid_trading import GridTradingStrategy
+            return GridTradingStrategy(strategy_id=bot["template_code"], params=bot["params"])
+        elif engine == "TrailingStopStrategy":
+            from quant_exchange.strategy.trailing_stop import TrailingStopStrategy
+            return TrailingStopStrategy(strategy_id=bot["template_code"], params=bot["params"])
+        elif engine == "MeanReversionStrategy":
+            from quant_exchange.strategy.mean_reversion import MeanReversionStrategy
+            return MeanReversionStrategy(strategy_id=bot["template_code"], params=bot["params"])
+        # Fallback
         return MovingAverageSentimentStrategy(strategy_id=bot["template_code"], params=bot["params"])
 
     def _strategy_context(self, bot: dict, stock: dict) -> StrategyContext:
@@ -423,12 +436,30 @@ class StrategyBotService:
     def _build_templates(self) -> dict[str, StrategyTemplate]:
         """Build a small template library inspired by hosted quant platforms."""
 
-        schema = (
+        ma_schema = (
             {"name": "fast_window", "type": "int", "min": 2, "max": 20},
             {"name": "slow_window", "type": "int", "min": 3, "max": 60},
             {"name": "sentiment_threshold", "type": "float", "min": 0.0, "max": 0.5},
             {"name": "max_weight", "type": "float", "min": 0.1, "max": 1.0},
             {"name": "volatility_cap", "type": "float", "min": 0.1, "max": 2.0},
+        )
+        grid_schema = (
+            {"name": "grid_levels", "type": "int", "min": 3, "max": 20},
+            {"name": "grid_spacing_pct", "type": "float", "min": 0.005, "max": 0.1},
+            {"name": "position_per_grid", "type": "float", "min": 0.05, "max": 0.5},
+            {"name": "max_total_position", "type": "float", "min": 0.1, "max": 1.0},
+        )
+        trail_schema = (
+            {"name": "trail_pct", "type": "float", "min": 0.01, "max": 0.3},
+            {"name": "entry_pct", "type": "float", "min": 0.01, "max": 0.2},
+            {"name": "max_weight", "type": "float", "min": 0.1, "max": 1.0},
+            {"name": "lookback_bars", "type": "int", "min": 5, "max": 60},
+        )
+        mean_rev_schema = (
+            {"name": "ma_window", "type": "int", "min": 5, "max": 60},
+            {"name": "z_threshold", "type": "float", "min": 0.5, "max": 5.0},
+            {"name": "max_weight", "type": "float", "min": 0.1, "max": 1.0},
+            {"name": "exit_threshold", "type": "float", "min": 0.0, "max": 1.0},
         )
         templates = [
             StrategyTemplate(
@@ -438,7 +469,7 @@ class StrategyBotService:
                 description="基于均线和情绪偏置的趋势跟随模板，适合股票波段研究与纸面机器人管理。",
                 engine_code="MovingAverageSentimentStrategy",
                 default_params={"fast_window": 3, "slow_window": 5, "sentiment_threshold": 0.05, "max_weight": 0.9, "volatility_cap": 0.8},
-                parameter_schema=schema,
+                parameter_schema=ma_schema,
             ),
             StrategyTemplate(
                 template_code="ma_breakout",
@@ -447,7 +478,7 @@ class StrategyBotService:
                 description="更快的参数配置，适合跟踪强趋势与突破类信号。",
                 engine_code="MovingAverageSentimentStrategy",
                 default_params={"fast_window": 2, "slow_window": 8, "sentiment_threshold": 0.08, "max_weight": 1.0, "volatility_cap": 0.7},
-                parameter_schema=schema,
+                parameter_schema=ma_schema,
             ),
             StrategyTemplate(
                 template_code="ma_defensive",
@@ -456,7 +487,37 @@ class StrategyBotService:
                 description="更保守的仓位和阈值设定，适合稳健研究和低波动跟踪。",
                 engine_code="MovingAverageSentimentStrategy",
                 default_params={"fast_window": 5, "slow_window": 13, "sentiment_threshold": 0.03, "max_weight": 0.55, "volatility_cap": 0.55},
-                parameter_schema=schema,
+                parameter_schema=ma_schema,
+            ),
+            # BOT-04: Grid trading template
+            StrategyTemplate(
+                template_code="grid_trading",
+                template_name="Grid 网格交易",
+                category="grid",
+                description="在参考价格上下构建等距网格，低位买入、高位卖出，适合震荡行情的量化网格策略。",
+                engine_code="GridTradingStrategy",
+                default_params={"grid_levels": 5, "grid_spacing_pct": 0.02, "position_per_grid": 0.15, "max_total_position": 0.9},
+                parameter_schema=grid_schema,
+            ),
+            # BOT-04: Trailing stop template
+            StrategyTemplate(
+                template_code="trailing_stop",
+                template_name="Trailing 追踪止损",
+                category="trend_following",
+                description="追踪峰值价格，设定回撤百分比为止损触发点，适合趋势跟踪与趋势保护。",
+                engine_code="TrailingStopStrategy",
+                default_params={"trail_pct": 0.05, "entry_pct": 0.02, "max_weight": 0.9, "lookback_bars": 20},
+                parameter_schema=trail_schema,
+            ),
+            # BOT-04: Mean reversion template
+            StrategyTemplate(
+                template_code="mean_reversion",
+                template_name="MeanRev 均值回归",
+                category="mean_reversion",
+                description="基于 z-score 偏离均值信号，在超卖时买入、超买时卖出，适合均值回归类行情。",
+                engine_code="MeanReversionStrategy",
+                default_params={"ma_window": 20, "z_threshold": 2.0, "max_weight": 0.85, "exit_threshold": 0.5},
+                parameter_schema=mean_rev_schema,
             ),
         ]
         return {template.template_code: template for template in templates}

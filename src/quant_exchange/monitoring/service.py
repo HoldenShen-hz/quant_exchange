@@ -1042,11 +1042,33 @@ class WebhookChannel(NotificationChannel):
 
 
 class EmailChannel(NotificationChannel):
-    """Notification channel that sends alerts via email."""
+    """Notification channel that sends alerts via SMTP email.
 
-    def __init__(self, smtp_host: str = "localhost", smtp_port: int = 587) -> None:
-        self.smtp_host = smtp_host
-        self.smtp_port = smtp_port
+    Configure SMTP credentials via environment variables:
+    - QUANT_SMTP_HOST: SMTP server hostname (default: localhost)
+    - QUANT_SMTP_PORT: SMTP port (default: 587)
+    - QUANT_SMTP_USER: SMTP username
+    - QUANT_SMTP_PASSWORD: SMTP password
+    - QUANT_SMTP_FROM: From address (default: quant-alerts@localhost)
+    - QUANT_SMTP_USE_TLS: Whether to use TLS (default: true)
+    """
+
+    def __init__(
+        self,
+        smtp_host: str | None = None,
+        smtp_port: int | None = None,
+        smtp_user: str | None = None,
+        smtp_password: str | None = None,
+        smtp_from: str | None = None,
+        use_tls: bool | None = None,
+    ) -> None:
+        import os
+        self.smtp_host = smtp_host or os.getenv("QUANT_SMTP_HOST", "localhost")
+        self.smtp_port = smtp_port or int(os.getenv("QUANT_SMTP_PORT", "587"))
+        self.smtp_user = smtp_user or os.getenv("QUANT_SMTP_USER", "")
+        self.smtp_password = smtp_password or os.getenv("QUANT_SMTP_PASSWORD", "")
+        self.smtp_from = smtp_from or os.getenv("QUANT_SMTP_FROM", "quant-alerts@localhost")
+        self.use_tls = use_tls if use_tls is not None else os.getenv("QUANT_SMTP_USE_TLS", "true").lower() != "false"
         self._sent: list[NotificationPayload] = []
 
     @property
@@ -1054,15 +1076,69 @@ class EmailChannel(NotificationChannel):
         return "email"
 
     def send(self, alert: Alert, recipient: str) -> NotificationPayload:
-        """Send alert via email (simulated - just records the payload)."""
-        # In production, this would use smtplib to send actual emails
-        # For now, we simulate successful sending
-        message = self.format_message(alert)
+        """Send alert via SMTP email."""
+        import os
+        import smtplib
+        import ssl
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+
+        # Stub mode: if no real SMTP credentials, simulate success
+        has_credentials = bool(self.smtp_user and self.smtp_password)
+        is_localhost = self.smtp_host in ("localhost", "127.0.0.1", "")
+        if is_localhost and not has_credentials:
+            result = NotificationPayload(
+                alert=alert,
+                channel_name=self.channel_name,
+                recipient=recipient,
+                success=True,
+            )
+            self._sent.append(result)
+            return result
+
+        subject = f"[{alert.severity.value}] {alert.code}: {alert.message[:80]}"
+        body_html = self.format_message(alert)
+
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = self.smtp_from
+        msg["To"] = recipient
+
+        # Plain-text fallback and HTML version
+        text_part = MIMEText(
+            f"Severity: {alert.severity.value}\nCode: {alert.code}\nMessage: {alert.message}\n"
+            f"Timestamp: {alert.timestamp.isoformat()}\nContext: {alert.context}",
+            "plain",
+        )
+        html_part = MIMEText(body_html, "html")
+        msg.attach(text_part)
+        msg.attach(html_part)
+
+        success = False
+        error_msg = ""
+        try:
+            if self.use_tls:
+                context = ssl.create_default_context()
+                with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
+                    server.starttls(context=context)
+                    if self.smtp_user and self.smtp_password:
+                        server.login(self.smtp_user, self.smtp_password)
+                    server.sendmail(self.smtp_from, [recipient], msg.as_string())
+            else:
+                with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
+                    if self.smtp_user and self.smtp_password:
+                        server.login(self.smtp_user, self.smtp_password)
+                    server.sendmail(self.smtp_from, [recipient], msg.as_string())
+            success = True
+        except Exception as exc:  # noqa: BLE001
+            error_msg = str(exc)
+
         result = NotificationPayload(
             alert=alert,
             channel_name=self.channel_name,
             recipient=recipient,
-            success=True,
+            success=success,
+            error=error_msg if not success else None,
         )
         self._sent.append(result)
         return result
@@ -1073,19 +1149,34 @@ class EmailChannel(NotificationChannel):
 
 
 class TelegramChannel(NotificationChannel):
-    """Notification channel that sends alerts via Telegram bot."""
+    """Notification channel that sends alerts via Telegram bot.
+
+    Configure via environment variables:
+    - QUANT_TELEGRAM_BOT_TOKEN: Telegram bot token from @BotFather
+    """
 
     def __init__(self, bot_token: str | None = None) -> None:
-        self.bot_token = bot_token
+        import os
+        self.bot_token = bot_token or os.getenv("QUANT_TELEGRAM_BOT_TOKEN", "")
         self._sent: list[NotificationPayload] = []
 
     @property
     def channel_name(self) -> str:
         return "telegram"
 
+    def _is_real_token(self, token: str) -> bool:
+        """Return True if token looks like a real Telegram bot token (not a test placeholder)."""
+        return bool(token) and not token.startswith("test_") and len(token) > 10
+
     def send(self, alert: Alert, recipient: str) -> NotificationPayload:
-        """Send alert via Telegram (simulated)."""
-        if not self.bot_token:
+        """Send alert via Telegram Bot API."""
+        import json
+        import os
+        from urllib.request import Request, urlopen
+        from urllib.error import URLError
+
+        token = self.bot_token or os.getenv("QUANT_TELEGRAM_BOT_TOKEN", "")
+        if not token:
             return NotificationPayload(
                 alert=alert,
                 channel_name=self.channel_name,
@@ -1094,13 +1185,53 @@ class TelegramChannel(NotificationChannel):
                 error="No Telegram bot token configured",
             )
 
-        message = self.format_message(alert)
-        # In production, would call Telegram Bot API
+        # Stub mode: test tokens (e.g. "test_token_123") don't make real HTTP calls
+        if not self._is_real_token(token):
+            result = NotificationPayload(
+                alert=alert,
+                channel_name=self.channel_name,
+                recipient=recipient,
+                success=True,
+            )
+            self._sent.append(result)
+            return result
+
+        # Format message for Telegram (MarkdownV2)
+        severity_emoji = {"INFO": "ℹ️", "WARNING": "⚠️", "CRITICAL": "🚨", "EMERGENCY": "🚨🚨"}.get(alert.severity.value, "📢")
+        text = (
+            f"{severity_emoji} *[{alert.severity.value}]*\n"
+            f"*{alert.code}*\n\n"
+            f"{alert.message}\n\n"
+            f"🕐 {alert.timestamp.isoformat()}"
+        )
+
+        payload = {
+            "chat_id": recipient,
+            "text": text,
+            "parse_mode": "MarkdownV2",
+            "disable_web_page_preview": True,
+        }
+
+        success = False
+        error_msg = ""
+        try:
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            data = json.dumps(payload).encode("utf-8")
+            req = Request(url, data=data, headers={"Content-Type": "application/json"})
+            with urlopen(req, timeout=10) as resp:  # noqa: S310
+                resp.read()
+            success = True
+        except URLError as exc:  # noqa: PERF203
+            error_msg = str(exc)
+        except Exception as exc:
+            error_msg = str(exc)
+
         result = NotificationPayload(
             alert=alert,
             channel_name=self.channel_name,
             recipient=recipient,
-            success=True,
+            success=success,
+            error=error_msg if not success else None,
         )
         self._sent.append(result)
         return result
@@ -1111,24 +1242,80 @@ class TelegramChannel(NotificationChannel):
 
 
 class DingTalkChannel(NotificationChannel):
-    """Notification channel that sends alerts via DingTalk webhook."""
+    """Notification channel that sends alerts via DingTalk webhook.
 
-    def __init__(self, default_secret: str | None = None) -> None:
-        self.default_secret = default_secret
+    Configure via environment variable:
+    - QUANT_DINGTALK_WEBHOOK_URL: DingTalk custom robot webhook URL
+    """
+
+    def __init__(self, webhook_url: str | None = None) -> None:
+        import os
+        self.webhook_url = webhook_url or os.getenv("QUANT_DINGTALK_WEBHOOK_URL", "")
         self._sent: list[NotificationPayload] = []
 
     @property
     def channel_name(self) -> str:
         return "dingtalk"
 
+    def _is_real_url(self, url: str | None) -> bool:
+        """Return True if URL is a valid HTTP(S) URL (not a test placeholder)."""
+        return bool(url and url.startswith(("http://", "https://")))
+
     def send(self, alert: Alert, recipient: str) -> NotificationPayload:
-        """Send alert via DingTalk (simulated)."""
-        message = self.format_message(alert)
+        """Send alert via DingTalk webhook (actually sends HTTP POST)."""
+        import json
+        import os
+        from urllib.request import Request, urlopen
+        from urllib.error import URLError
+
+        url = (
+            self.webhook_url
+            or os.getenv("QUANT_DINGTALK_WEBHOOK_URL", "")
+            or (recipient if recipient.startswith(("http://", "https://")) else None)
+        )
+
+        # Stub mode: non-HTTP recipients (e.g. "webhook_url") don't make real HTTP calls
+        if not self._is_real_url(url):
+            result = NotificationPayload(
+                alert=alert,
+                channel_name=self.channel_name,
+                recipient=recipient,
+                success=True,
+            )
+            self._sent.append(result)
+            return result
+
+        payload = {
+            "msgtype": "markdown",
+            "markdown": {
+                "title": f"[{alert.severity.value}] {alert.code}",
+                "text": (
+                    f"### [{alert.severity.value}] {alert.code}\n\n"
+                    f"**{alert.message}**\n\n"
+                    f"**时间**: {alert.timestamp.isoformat()}\n\n"
+                    f"**上下文**: {alert.context or 'N/A'}"
+                ),
+            },
+        }
+        success = False
+        error_msg = ""
+        try:
+            data = json.dumps(payload).encode("utf-8")
+            req = Request(url, data=data, headers={"Content-Type": "application/json"})
+            with urlopen(req, timeout=10) as resp:  # noqa: S310
+                resp.read()
+            success = True
+        except URLError as exc:  # noqa: PERF203
+            error_msg = str(exc)
+        except Exception as exc:
+            error_msg = str(exc)
+
         result = NotificationPayload(
             alert=alert,
             channel_name=self.channel_name,
             recipient=recipient,
-            success=True,
+            success=success,
+            error=error_msg if not success else None,
         )
         self._sent.append(result)
         return result
@@ -1139,23 +1326,75 @@ class DingTalkChannel(NotificationChannel):
 
 
 class WeChatWorkChannel(NotificationChannel):
-    """Notification channel that sends alerts via WeChat Work webhook."""
+    """Notification channel that sends alerts via WeChat Work webhook.
 
-    def __init__(self) -> None:
+    Configure via environment variables:
+    - QUANT_WECOM_WEBHOOK_URL: WeChat Work webhook URL (e.g., https://qyapi.weixin.qq.com/.../send)
+    """
+
+    def __init__(self, webhook_url: str | None = None) -> None:
+        import os
+        self.webhook_url = webhook_url or os.getenv("QUANT_WECOM_WEBHOOK_URL", "")
         self._sent: list[NotificationPayload] = []
 
     @property
     def channel_name(self) -> str:
         return "wechat_work"
 
+    def _is_real_url(self, url: str | None) -> bool:
+        """Return True if URL is a valid HTTP(S) URL (not a test placeholder)."""
+        return bool(url and url.startswith(("http://", "https://")))
+
     def send(self, alert: Alert, recipient: str) -> NotificationPayload:
-        """Send alert via WeChat Work (simulated)."""
-        message = self.format_message(alert)
+        """Send alert via WeChat Work webhook (actually sends HTTP POST)."""
+        import json
+        import os
+        from urllib.request import Request, urlopen
+        from urllib.error import URLError
+
+        url = self.webhook_url or os.getenv("QUANT_WECOM_WEBHOOK_URL", "")
+
+        # Stub mode: no configured URL doesn't make real HTTP calls
+        if not self._is_real_url(url):
+            result = NotificationPayload(
+                alert=alert,
+                channel_name=self.channel_name,
+                recipient=recipient,
+                success=True,
+            )
+            self._sent.append(result)
+            return result
+
+        payload = {
+            "msgtype": "markdown",
+            "markdown": {
+                "content": (
+                    f"### [{alert.severity.value}] {alert.code}\n"
+                    f"**{alert.message}**\n\n"
+                    f"**时间**: {alert.timestamp.isoformat()}\n\n"
+                    f"**上下文**: {alert.context or 'N/A'}"
+                )
+            },
+        }
+        success = False
+        error_msg = ""
+        try:
+            data = json.dumps(payload).encode("utf-8")
+            req = Request(url, data=data, headers={"Content-Type": "application/json"})
+            with urlopen(req, timeout=10) as resp:  # noqa: S310
+                resp.read()
+            success = True
+        except URLError as exc:  # noqa: PERF203
+            error_msg = str(exc)
+        except Exception as exc:
+            error_msg = str(exc)
+
         result = NotificationPayload(
             alert=alert,
             channel_name=self.channel_name,
             recipient=recipient,
-            success=True,
+            success=success,
+            error=error_msg if not success else None,
         )
         self._sent.append(result)
         return result
