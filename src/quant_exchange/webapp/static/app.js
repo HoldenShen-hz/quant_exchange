@@ -507,8 +507,8 @@ function renderDetail(stock) {
   const changeSign = changeValue >= 0 ? "+" : "";
   const limitUp = lastPrice ? formatNumber(lastPrice * 1.1) : "-";
   const limitDown = lastPrice ? formatNumber(lastPrice * 0.9) : "-";
-  const mcap = stock.market_cap ? formatNumber(stock.market_cap) + "亿" : "-";
-  const floatMcap = stock.float_market_cap ? formatNumber(stock.float_market_cap) + "亿" : "-";
+  const mcap = stock.market_cap ? formatNumber(stock.market_cap / 1e8) + "亿" : "-";
+  const floatMcap = stock.float_market_cap ? formatNumber(stock.float_market_cap / 1e8) + "亿" : "-";
 
   /* === 1. Stock header (top banner like 同花顺) === */
   const header = document.getElementById("stock-header");
@@ -668,8 +668,8 @@ function renderStockSubTab(subtab, stockOverride) {
       '<div class="f10-section"><h4>竞争优势</h4><p>' + (stock.competitive_advantages || "-") + '</p></div>' +
       '</div>';
   } else if (subtab === "shareholders") {
-    html = '<div class="f10-section"><h4>股东信息</h4><p>总市值：' + (stock.market_cap ? formatNumber(stock.market_cap) + '亿' : '-') +
-      '</p><p>流通市值：' + (stock.float_market_cap ? formatNumber(stock.float_market_cap) + '亿' : '-') +
+    html = '<div class="f10-section"><h4>股东信息</h4><p>总市值：' + (stock.market_cap ? formatNumber(stock.market_cap / 1e8) + '亿' : '-') +
+      '</p><p>流通市值：' + (stock.float_market_cap ? formatNumber(stock.float_market_cap / 1e8) + '亿' : '-') +
       '</p><p>上市日期：' + (stock.listing_date || "-") + '</p><p>货币：' + (stock.currency || "-") + '</p></div>';
   } else if (subtab === "news") {
     html = '<div class="f10-section"><h4>公司大事</h4><p>暂无最新公告与新闻数据。</p></div>';
