@@ -331,6 +331,65 @@ function formatLargeNumber(value) {
   return sign + n.toLocaleString("zh-CN", { maximumFractionDigits: 2 });
 }
 
+/** Format stock volume: stored in 股 (shares), display as 亿股 / 亿口 */
+function formatStockVolume(stock) {
+  if (stock.volume == null) return "-";
+  var v = Number(stock.volume);
+  if (isNaN(v)) return "-";
+  // Normalize: raw volume is in shares, divide by 1e8 to get 亿股
+  var display = Math.abs(v) / 1e8;
+  var sign = v < 0 ? "-" : "";
+  if (display >= 1) {
+    return sign + display.toFixed(2) + "亿";
+  }
+  return sign + (display * 1e4).toFixed(2) + "万";
+}
+
+/** Format stock turnover with currency symbol: CNY→亿, HKD→亿港币, USD→亿美元 */
+function formatStockTurnover(stock) {
+  if (stock.turnover == null) return "-";
+  var v = Number(stock.turnover);
+  if (isNaN(v)) return "-";
+  var display = Math.abs(v) / 1e8; // normalize to 亿
+  var sign = v < 0 ? "-" : "";
+  var suffix = "亿";
+  var region = stock.market_region || stock.region || "";
+  if (region === "HK") suffix = "亿港币";
+  else if (region === "US") suffix = "亿美元";
+  else suffix = "亿"; // CN or default
+  if (display >= 1) {
+    return sign + display.toFixed(2) + suffix;
+  }
+  return sign + (display * 1e4).toFixed(2) + "万" + suffix;
+}
+
+/** Format stock market_cap with currency symbol.
+ * CN stocks: raw may be in 元 or 亿; use threshold heuristic.
+ * HK: 亿港币, US: 亿美元
+ */
+function formatStockMarketCap(stock) {
+  if (stock.market_cap == null) return "-";
+  var v = Number(stock.market_cap);
+  if (isNaN(v)) return "-";
+  var sign = v < 0 ? "-" : "";
+  var region = stock.market_region || stock.region || "";
+  var currency = stock.currency || (region === "HK" ? "HKD" : region === "US" ? "USD" : "CNY");
+  var suffix = "亿";
+  if (region === "HK") suffix = "亿港币";
+  else if (region === "US") suffix = "亿美元";
+  // Heuristic: CNY stocks with market_cap < 1e9 are already in 亿 (not 元)
+  var display;
+  if (currency === "CNY" && Math.abs(v) < 1e9) {
+    display = Math.abs(v); // already in 亿
+  } else {
+    display = Math.abs(v) / 1e8; // normalize 元 → 亿
+  }
+  if (display >= 1) {
+    return sign + display.toFixed(2) + suffix;
+  }
+  return sign + (display * 1e4).toFixed(2) + "万" + suffix;
+}
+
 function metricClass(value) {
   if (value === null || value === undefined || value === "") {
     return "";
@@ -507,8 +566,15 @@ function renderDetail(stock) {
   const changeSign = changeValue >= 0 ? "+" : "";
   const limitUp = lastPrice ? formatNumber(lastPrice * 1.1) : "-";
   const limitDown = lastPrice ? formatNumber(lastPrice * 0.9) : "-";
-  const mcap = stock.market_cap ? formatNumber(stock.market_cap / 1e8) + "亿" : "-";
-  const floatMcap = stock.float_market_cap ? formatNumber(stock.float_market_cap / 1e8) + "亿" : "-";
+  const mcap = stock.market_cap != null ? formatStockMarketCap(stock) : "-";
+  const floatMcap = stock.float_market_cap != null ? (() => {
+    var v = Number(stock.float_market_cap);
+    if (isNaN(v)) return "-";
+    var region = stock.market_region || "";
+    var suffix = region === "HK" ? "亿港币" : region === "US" ? "亿美元" : "亿";
+    var display = Math.abs(v) / 1e8;
+    return (v < 0 ? "-" : "") + display.toFixed(2) + suffix;
+  })() : "-";
 
   /* === 1. Stock header (top banner like 同花顺) === */
   const header = document.getElementById("stock-header");
@@ -668,8 +734,8 @@ function renderStockSubTab(subtab, stockOverride) {
       '<div class="f10-section"><h4>竞争优势</h4><p>' + (stock.competitive_advantages || "-") + '</p></div>' +
       '</div>';
   } else if (subtab === "shareholders") {
-    html = '<div class="f10-section"><h4>股东信息</h4><p>总市值：' + (stock.market_cap ? formatNumber(stock.market_cap / 1e8) + '亿' : '-') +
-      '</p><p>流通市值：' + (stock.float_market_cap ? formatNumber(stock.float_market_cap / 1e8) + '亿' : '-') +
+    html = '<div class="f10-section"><h4>股东信息</h4><p>总市值：' + (stock.market_cap != null ? formatStockMarketCap(stock) : '-') +
+      '</p><p>流通市值：' + (stock.float_market_cap != null ? formatStockMarketCap(Object.assign({}, stock, {market_cap: stock.float_market_cap})) : '-') +
       '</p><p>上市日期：' + (stock.listing_date || "-") + '</p><p>货币：' + (stock.currency || "-") + '</p></div>';
   } else if (subtab === "news") {
     html = '<div class="f10-section"><h4>公司大事</h4><p>暂无最新公告与新闻数据。</p></div>';
@@ -3408,7 +3474,11 @@ function renderDragonTigerPanel() {
   var totalSellVol = top.filter(function (t) { return t.stock.change_pct < 0; }).reduce(function (s, t) { return s + (t.stock.volume || 0); }, 0);
   if (summaryEl) {
     var netDirection = totalBuyVol > totalSellVol ? "偏多" : totalSellVol > totalBuyVol ? "偏空" : "中性";
-    summaryEl.textContent = "Top 9 大单异动 · 合计净流入 " + formatLargeNumber(totalBuyVol - totalSellVol) + " 股 · 整体情绪 " + netDirection;
+    var netVol = totalBuyVol - totalSellVol;
+    var netVolDisplay = Math.abs(netVol) / 1e8;
+    var netVolStr = netVolDisplay >= 1 ? netVolDisplay.toFixed(2) + "亿" : (netVolDisplay * 1e4).toFixed(2) + "万";
+    var netSign = netVol >= 0 ? "+" : "-";
+    summaryEl.textContent = "Top 9 大单异动 · 合计净流入 " + netSign + netVolStr + " 股 · 整体情绪 " + netDirection;
   }
   container.innerHTML = top.map(function (t) {
     var s = t.stock;
@@ -3420,8 +3490,8 @@ function renderDragonTigerPanel() {
         '<span class="dragon-tiger-badge ' + type + '">' + label + '</span>' +
       '</div>' +
       '<div class="dragon-tiger-metric"><strong>' + formatNumber(s.change_pct) + '%</strong> 涨跌</div>' +
-      '<div class="dragon-tiger-metric"><strong>' + formatLargeNumber(s.volume) + '</strong> 成交量</div>' +
-      '<div class="dragon-tiger-metric"><strong>' + formatNumber(s.turnover) + '</strong> 成交额</div>' +
+      '<div class="dragon-tiger-metric"><strong>' + formatStockVolume(s) + '</strong> 成交量</div>' +
+      '<div class="dragon-tiger-metric"><strong>' + formatStockTurnover(s) + '</strong> 成交额</div>' +
     '</div>';
   }).join("");
   container.querySelectorAll(".dragon-tiger-card").forEach(function (card) {
@@ -4613,9 +4683,9 @@ function renderTable(stocks) {
           <td>${formatNumber(stock.last_price)}</td>
           <td class="${metricClass(stock.change_pct)}">${stock.change_pct != null ? formatNumber(stock.change_pct) + "%" : "-"}</td>
           <td class="${metricClass(stock.amplitude)}">${stock.amplitude != null ? formatNumber(stock.amplitude) + "%" : "-"}</td>
-          <td>${formatLargeNumber(stock.volume)}</td>
-          <td>${formatLargeNumber(stock.turnover)}</td>
-          <td>${formatLargeNumber(stock.market_cap)}</td>
+          <td>${formatStockVolume(stock)}</td>
+          <td>${formatStockTurnover(stock)}</td>
+          <td>${formatStockMarketCap(stock)}</td>
           <td>${stock.sector}</td>
           <td>${formatNumber(stock.pe_ttm)}</td>
           <td>${formatNumber(stock.pb)}</td>
