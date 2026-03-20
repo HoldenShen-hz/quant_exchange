@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import time
+import random
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
+from typing import Any
 from uuid import uuid4
 
 from quant_exchange.core.models import Instrument, Kline
@@ -658,3 +662,278 @@ class DerivativesDexService:
         if self.persistence is not None:
             self.persistence.upsert_record("dex_liquidity_positions", "position_code", position_code, payload)
         return payload
+
+
+class ErrorCategory(Enum):
+    """Error category classification for recovery decision-making."""
+
+    RETRYABLE_NETWORK = "retryable_network"       # Timeout, connection reset
+    RETRYABLE_RATE_LIMIT = "retryable_rate_limit"  # 429 Too Many Requests
+    RETRYABLE_SERVER = "retryable_server"         # 500/502/503 from exchange
+    NON_RETRYABLE_CLIENT = "non_retryable_client"  # 400, invalid params
+    NON_RETRYABLE_AUTH = "non_retryable_auth"      # 401, 403, invalid signature
+    FATAL = "fatal"                                 # Circuit open, illegal state
+
+
+@dataclass
+class RecoveryPolicy:
+    """Policy governing how errors are retried and handled."""
+
+    max_retries: int = 3
+    base_delay_seconds: float = 1.0
+    max_delay_seconds: float = 30.0
+    exponential_base: float = 2.0
+    jitter: bool = True
+    fallback_enabled: bool = True
+    circuit_failure_threshold: int = 5
+    circuit_timeout_seconds: float = 30.0
+
+
+@dataclass
+class RecoveryResult:
+    """Result of an operation with recovery applied."""
+
+    success: bool
+    result: Any | None = None
+    error: str | None = None
+    error_category: str | None = None
+    attempts: int = 1
+    recovered: bool = False
+    circuit_open: bool = False
+    fallback_used: bool = False
+
+
+class ErrorRecoveryService:
+    """Full-chain error recovery service (EX-07).
+
+    Provides:
+    - Exponential backoff retry with jitter
+    - Per-operation-type circuit breakers
+    - Fallback strategies for degraded mode
+    - Error categorization and event logging
+    """
+
+    DEFAULT_POLICY = RecoveryPolicy()
+
+    def __init__(self, persistence=None) -> None:
+        self.persistence = persistence
+        self._circuit_breakers: dict[str, dict] = {}  # operation → state
+        self._error_log: list[dict] = []
+        self._fallback_registry: dict[str, callable] = {}
+        self._policies: dict[str, RecoveryPolicy] = {}
+
+    def execute_with_recovery(
+        self,
+        operation_name: str,
+        fn: callable,
+        fallback_fn: callable | None = None,
+        policy: RecoveryPolicy | None = None,
+    ) -> RecoveryResult:
+        """Execute a callable with full retry/circuit/fallback handling (EX-07).
+
+        Args:
+            operation_name: Logical name used for circuit breaker tracking.
+            fn: The operation to execute. Should raise exceptions on failure.
+            fallback_fn: Optional fallback callable when all retries are exhausted.
+            policy: Optional per-operation recovery policy.
+
+        Returns:
+            RecoveryResult with success flag, result or error details.
+        """
+        policy = policy or self.DEFAULT_POLICY
+        attempts = 0
+        last_error: Exception | None = None
+
+        # Check circuit breaker first
+        cb = self._get_circuit_breaker(operation_name, policy)
+        if not cb["can_execute"]:
+            self._log_error(operation_name, "CIRCUIT_OPEN", ErrorCategory.FATAL.value, attempts, str(last_error))
+            return RecoveryResult(
+                success=False,
+                error="circuit_open",
+                error_category=ErrorCategory.FATAL.value,
+                attempts=0,
+                circuit_open=True,
+            )
+
+        while attempts < policy.max_retries + 1:
+            attempts += 1
+            try:
+                result = fn()
+                self._record_success(operation_name)
+                return RecoveryResult(success=True, result=result, attempts=attempts, recovered=attempts > 1)
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                error_category = self._classify_error(exc)
+                self._record_failure(operation_name)
+
+                # Non-retryable errors fail immediately
+                if error_category in (ErrorCategory.NON_RETRYABLE_CLIENT, ErrorCategory.NON_RETRYABLE_AUTH, ErrorCategory.FATAL):
+                    self._log_error(operation_name, type(exc).__name__, error_category.value, attempts, str(exc))
+                    return RecoveryResult(
+                        success=False,
+                        error=str(exc),
+                        error_category=error_category.value,
+                        attempts=attempts,
+                    )
+
+                # Check circuit after each failure
+                cb = self._get_circuit_breaker(operation_name, policy)
+                if not cb["can_execute"]:
+                    break  # Will fall through to fallback
+
+                # Only retry if we have attempts left
+                if attempts <= policy.max_retries:
+                    delay = self._compute_delay(policy, attempts)
+                    time.sleep(delay)
+
+        # All retries exhausted
+        self._log_error(operation_name, type(last_error).__name__ if last_error else "Unknown",
+                         ErrorCategory.FATAL.value, attempts, str(last_error))
+
+        # Try fallback
+        if fallback_fn is not None and policy.fallback_enabled:
+            try:
+                result = fallback_fn()
+                return RecoveryResult(
+                    success=True,
+                    result=result,
+                    attempts=attempts,
+                    recovered=True,
+                    fallback_used=True,
+                )
+            except Exception as fallback_exc:  # noqa: BLE001
+                self._log_error(operation_name, type(fallback_exc).__name__, ErrorCategory.FATAL.value,
+                                attempts, f"FALLBACK_FAILED: {fallback_exc}")
+
+        return RecoveryResult(
+            success=False,
+            error=str(last_error),
+            error_category=self._classify_error(last_error).value if last_error else None,
+            attempts=attempts,
+        )
+
+    def _classify_error(self, exc: Exception) -> ErrorCategory:
+        """Classify an exception into a recovery category."""
+        msg = str(exc).lower()
+        name = type(exc).__name__
+
+        if "timeout" in msg or "connection" in msg or name in ("ConnectionError", "TimeoutError", "HTTPError"):
+            if "429" in msg or "rate" in msg:
+                return ErrorCategory.RETRYABLE_RATE_LIMIT
+            if any(x in msg for x in ("500", "502", "503", "504", "bad_gateway", "server_error")):
+                return ErrorCategory.RETRYABLE_SERVER
+            return ErrorCategory.RETRYABLE_NETWORK
+
+        if "401" in msg or "403" in msg or "auth" in msg or "signature" in msg or "unauthorized" in msg:
+            return ErrorCategory.NON_RETRYABLE_AUTH
+
+        if "400" in msg or "invalid" in msg or "bad_request" in msg or "validation" in msg:
+            return ErrorCategory.NON_RETRYABLE_CLIENT
+
+        if "circuit" in msg or "circuit_open" in msg:
+            return ErrorCategory.FATAL
+
+        # Default: treat as retryable server error
+        return ErrorCategory.RETRYABLE_SERVER
+
+    def _compute_delay(self, policy: RecoveryPolicy, attempt: int) -> float:
+        """Compute delay with exponential backoff and optional jitter."""
+        delay = min(policy.base_delay_seconds * (policy.exponential_base ** (attempt - 1)), policy.max_delay_seconds)
+        if policy.jitter:
+            delay *= (0.5 + random.random())
+        return delay
+
+    def _get_circuit_breaker(self, operation_name: str, policy: RecoveryPolicy) -> dict:
+        """Get or create circuit breaker state for an operation."""
+        if operation_name not in self._circuit_breakers:
+            self._circuit_breakers[operation_name] = {
+                "state": "CLOSED",  # CLOSED | OPEN | HALF_OPEN
+                "failure_count": 0,
+                "success_count": 0,
+                "last_failure_time": 0.0,
+                "config": policy,
+            }
+        cb = self._circuit_breakers[operation_name]
+        cfg: RecoveryPolicy = cb["config"]
+
+        if cb["state"] == "OPEN":
+            if time.time() - cb["last_failure_time"] >= cfg.circuit_timeout_seconds:
+                cb["state"] = "HALF_OPEN"
+                cb["success_count"] = 0
+        return cb
+
+    def _record_success(self, operation_name: str) -> None:
+        """Record a success against the circuit breaker."""
+        cb = self._circuit_breakers.get(operation_name)
+        if cb is None:
+            return
+        if cb["state"] == "HALF_OPEN":
+            cb["success_count"] += 1
+            if cb["success_count"] >= cb["config"].circuit_success_threshold:
+                cb["state"] = "CLOSED"
+                cb["failure_count"] = 0
+        elif cb["state"] == "CLOSED":
+            cb["failure_count"] = 0
+
+    def _record_failure(self, operation_name: str) -> None:
+        """Record a failure against the circuit breaker."""
+        cb = self._circuit_breakers.get(operation_name)
+        if cb is None:
+            return
+        cb["failure_count"] += 1
+        cb["last_failure_time"] = time.time()
+        cfg: RecoveryPolicy = cb["config"]
+        if cb["state"] == "HALF_OPEN":
+            cb["state"] = "OPEN"
+        elif cb["failure_count"] >= cfg.circuit_failure_threshold:
+            cb["state"] = "OPEN"
+
+    def get_circuit_state(self, operation_name: str) -> str:
+        """Return the current circuit state for an operation."""
+        cb = self._circuit_breakers.get(operation_name)
+        return cb["state"] if cb else "UNKNOWN"
+
+    def reset_circuit(self, operation_name: str) -> dict:
+        """Manually reset a circuit breaker to CLOSED state."""
+        if operation_name in self._circuit_breakers:
+            self._circuit_breakers[operation_name] = {
+                "state": "CLOSED",
+                "failure_count": 0,
+                "success_count": 0,
+                "last_failure_time": 0.0,
+                "config": self._circuit_breakers[operation_name]["config"],
+            }
+        return {"operation": operation_name, "state": "RESET"}
+
+    def get_error_summary(self, *, limit: int = 50) -> list[dict]:
+        """Return recent error events for monitoring and debugging."""
+        return list(reversed(self._error_log[-limit:]))
+
+    def _log_error(
+        self,
+        operation: str,
+        error_type: str,
+        category: str,
+        attempts: int,
+        message: str,
+    ) -> None:
+        """Persist an error event."""
+        entry = {
+            "error_code": f"err:{uuid4().hex[:8]}",
+            "operation": operation,
+            "error_type": error_type,
+            "category": category,
+            "attempts": attempts,
+            "message": message,
+            "created_at": _now(),
+        }
+        self._error_log.append(entry)
+        if self.persistence is not None:
+            self.persistence.upsert_record(
+                "sys_error_recovery_log",
+                "error_code",
+                entry["error_code"],
+                entry,
+                extra_columns={"operation": operation, "category": category},
+            )
