@@ -1,11 +1,11 @@
 # TODO: 未完成功能清单
 
 > 基于 doc/ 全部需求文档与代码库的逐项审计，截至 2026-03-20
-> 整体完成度约 87%（本次更新：MD-08全市场快照、RP-03/PP-06漂移分析、RK-06黑天鹅保护、PF-05归因增强、FT-07跨期套利、BOT-02/03机器人控制台）
+> 整体完成度约 90%（本次更新：MD-05特征层、RP-04异常检测、FT-08期现套利、BOT-06多策略组合机器人）
 
 ---
 
-## 一、核心交易链路（P0）— 完成度 ~82%
+## 一、核心交易链路（P0）— 完成度 ~90%
 
 ### 1.1 已完成
 - [x] MD-01~MD-07: 多源行情接入、历史数据、统一模型、查询API
@@ -24,7 +24,7 @@
 
 | 编号 | 功能 | 状态 | 缺失细节 |
 |------|------|------|----------|
-| MD-05 | 数据分层（raw/标准/特征层） | PARTIAL | 特征层未实现 |
+| MD-05 | 数据分层（raw/标准/特征层） | YES | FeaturePipeline实现，transform(技术指标+动量+均值回归+波动率+振荡器+成交量+市场微结构)、standardize(z-score)、transform_universe(截面rank+percentile)、CrossSectionalFeatures |
 | MD-08 | 全市场快照 | YES | market_breadth(跨市场涨跌家数/A/D比/情绪指数)、advance/decline/unchanged统计、per-market sentiment、global_sentiment_index |
 | MD-10 | 参考数据（交易日历、公司行为） | YES | CorporateAction模型已实现(分红/拆股/权利发行/并购)，支持前复权/后复权因子计算 |
 | ST-05 | 因子库 | PARTIAL | 仅基础因子(SMA/EMA/RSI/MACD)，缺ML因子、截面因子 |
@@ -42,7 +42,7 @@
 | MO-05 | 告警去重 | YES | 内容哈希去重(content_based_dedup参数)，SHA256消息+上下文去重，保留code级escalation，支持抑制窗口maintenance |
 | MO-06 | 告警Web查询UI | YES | 后端API已实现，前端告警历史展示已添加 |
 | RP-03 | 回测vs实盘漂移报告 | YES | slippage_analysis(逐笔vs信号价/方向性 adverse favorable分类)、signal_divergence(direction_mismatch/timing_diff)、drift_score composite(0-100评分+level)、drift_recommendations actionable |
-| RP-04 | 归因/异常报告 | PARTIAL | 基础归因有，异常检测不足 |
+| RP-04 | 归因/异常报告 | YES | detect_return_outliers(z-score滚动窗口异常检测+SEVERE/MODERATE评级)、detect_risk_contribution_anomalies(边际风险偏离)、detect_sector_drift_anomalies(行业配置偏离)、generate_anomaly_report(综合severity+recommendations) |
 | RP-06 | 合规报告 | YES | ComplianceReportService实现，支持持仓限额/日损失/杠杆/保证金/订单拒绝率/登录安全检查，生成合规报告含监管注意事项 |
 | SE-03 | 审计日志(完整) | PARTIAL | ControlPlaneAPI所有操作均已接入audit，包含订单提交/撤销/回测/期货交易 |
 | SE-05 | 凭证加密/保险库 | YES | AES-256加密存储(PBKDF2密钥派生)，支持HMAC验证，防盗保护 |
@@ -87,7 +87,7 @@
 | FT-05 | 期货模拟交易 | YES | 下单面板、持仓展示、账户仪表盘已完成，支持做多/做空、市价/限价 |
 | FT-06 | 期货风控(保证金/强平) | YES | 保证金占用/维持保证金/风控等级(安全/警告/危险/强平)，支持逐仓/全仓，可视化风险指示器 |
 | FT-07 | 跨期套利工具 | YES | get_calendar_spread(近远月价差/价差%/年化Roll估算/z-score)、analyze_spread_history(均值/标准差/区间/z-score/趋势/回归潜力)、get_spread_trading_signal(BUY/SELL/SPREAD信号+置信度+驱动因素) |
-| FT-08 | 期现套利工具 | NO | 未实现 |
+| FT-08 | 期现套利工具 | YES | get_spot_reference_price(便利收益率折算现货价)、analyze_basis_history(均值/z-score/趋势/回归潜力)、get_basis_trading_signal(BUY/SELL/SPREAD信号+置信度) |
 | FT-09 | 持仓分析 | YES | get_position_analytics()实现，持仓时长/盈亏比/保证金效率/组合占比/多空敞口/集中度HHI，支持逐仓分析 |
 | FT-10 | 真实期货数据源 | NO | 仅模拟数据 |
 
@@ -120,7 +120,7 @@
 
 ---
 
-## 六、机器人/自动交易（BOT）— 完成度 ~35%
+## 六、机器人/自动交易（BOT）— 完成度 ~60%
 
 | 编号 | 功能 | 状态 | 缺失细节 |
 |------|------|------|----------|
@@ -129,7 +129,7 @@
 | BOT-03 | 状态展示(运行/收益/风险) | YES | estimated_pnl_pct/estimated_pnl_abs字段、SSE实时bot_state_changed含完整PnL数据、前端实时更新bot-card无需全量刷新 |
 | BOT-04 | 预设模板(网格/追踪/均值回归) | YES | 网格/均线/追踪止损/均值回归模板已实现 |
 | BOT-05 | 通知集成 | YES | 已接入Telegram/DingTalk/WeChat Work/Email，支持真实HTTP调用，支持Markdown格式 |
-| BOT-06 | 高级机器人(多策略组合) | NO | 未实现 |
+| BOT-06 | 高级机器人(多策略组合) | YES | create_composite_bot(多子策略组合+权重归一化+自动再平衡)、list_composite_bots、get_composite_metrics(加权信号+偏离度)、rebalance_composite_bot(等权重/信号比例/显式权重三种模式)、start_composite_bot/stop_composite_bot |
 | BOT-07 | AI调参 | NO | 未实现 |
 
 ---

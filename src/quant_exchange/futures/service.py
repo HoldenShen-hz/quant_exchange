@@ -795,6 +795,241 @@ class FuturesTradingService:
         std = variance ** 0.5
         return (current_spread - mean) / max(std, 1e-9)
 
+    # ── FT-08: Futures-Spot (Basis) Arbitrage ─────────────────────────────────
+
+    # Mapping from futures contract prefix → (spot_instrument_id, spot_name, convenience_yield_pct)
+    _SPOT_REFERENCE: dict[str, tuple[str, str, float]] = {
+        "IF": ("CSI300", "沪深300指数", 0.03),    # 3% annualized convenience yield
+        "IC": ("CSI500", "中证500指数", 0.03),
+        "IH": ("SSE50", "上证50指数", 0.03),
+        "AU": ("XAU", "国际黄金现货", 0.015),       # Gold has low convenience yield
+        "CU": ("COPPER", "沪铜现货", 0.02),
+        "RB": ("REBAR", "螺纹钢现货", 0.025),
+        "ES": ("SPX", "标普500指数", 0.03),
+        "NQ": ("NDX", "纳斯达克100指数", 0.03),
+        "CL": ("WTI", "WTI原油现货", 0.04),         # Oil has higher convenience yield
+        "GC": ("XAU", "COMEX黄金现货", 0.015),
+    }
+
+    def get_spot_reference_price(self, futures_contract_id: str) -> dict[str, Any]:
+        """Get the spot reference price for a futures contract (FT-08).
+
+        Returns synthetic spot price based on futures price adjusted by
+        annualized convenience yield and days to expiry.
+        """
+        futures_price = self._get_spot_or_future_price(futures_contract_id)
+        if futures_price is None:
+            return {"futures_contract": futures_contract_id, "error": "Futures price not available"}
+
+        prefix = futures_contract_id[:2] if futures_contract_id[:2] in self._SPOT_REFERENCE else futures_contract_id[:1]
+        spot_id, spot_name, conv_yield = self._SPOT_REFERENCE.get(prefix, (futures_contract_id, "Unknown", 0.03))
+        days_to_expiry = self._days_to_expiry(futures_contract_id)
+        annualized_factor = days_to_expiry / 365.0
+
+        # Spot price = futures price / (1 + convenience_yield * time_to_expiry)
+        # Convenience yield makes spot lower than futures (normal market)
+        spot_price = futures_price / (1 + conv_yield * annualized_factor)
+        basis = futures_price - spot_price
+        basis_pct = (basis / spot_price * 100) if spot_price != 0 else 0.0
+
+        return {
+            "futures_contract": futures_contract_id,
+            "spot_instrument_id": spot_id,
+            "spot_name": spot_name,
+            "futures_price": round(futures_price, 4),
+            "spot_price_estimated": round(spot_price, 4),
+            "basis": round(basis, 4),
+            "basis_pct": round(basis_pct, 4),
+            "days_to_expiry": days_to_expiry,
+            "convenience_yield_pct": round(conv_yield * 100, 3),
+            "annualized_basis_pct": round(basis_pct / annualized_factor, 4) if annualized_factor > 0 else 0.0,
+            "timestamp": utc_now().isoformat(),
+        }
+
+    def analyze_basis_history(
+        self,
+        futures_contract_id: str,
+        lookback_days: int = 30,
+    ) -> dict[str, Any]:
+        """Analyze historical basis data for a futures-spot pair (FT-08).
+
+        Returns historical basis statistics, regime classification,
+        and mean-reversion potential.
+        """
+        if not hasattr(self, "_basis_history"):
+            self._basis_history: dict[str, list[tuple[datetime, float]]] = {}
+
+        history = self._basis_history.get(futures_contract_id, [])
+
+        # Prune old entries
+        cutoff = utc_now() - timedelta(days=lookback_days)
+        history = [(dt, b) for dt, b in history if dt > cutoff]
+        self._basis_history[futures_contract_id] = history
+
+        # Simulate seed history if empty
+        if not history:
+            ref = self.get_spot_reference_price(futures_contract_id)
+            if "error" in ref:
+                return {"futures_contract": futures_contract_id, "error": ref["error"]}
+            futures_price = ref["futures_price"]
+            spot_price = ref["spot_price_estimated"]
+            base_basis = futures_price - spot_price
+            import random
+            random.seed(futures_contract_id.encode())
+            for i in range(lookback_days):
+                dt = utc_now() - timedelta(days=lookback_days - i)
+                noise = random.gauss(0, abs(base_basis) * 0.03 + 1)
+                hist_basis = base_basis + noise
+                history.append((dt, hist_basis))
+            self._basis_history[futures_contract_id] = history
+
+        if len(history) < 3:
+            return {
+                "futures_contract": futures_contract_id,
+                "error": "Insufficient history",
+                "data_points": len(history),
+            }
+
+        bases = [b for _, b in history]
+        mean_basis = sum(bases) / len(bases)
+        variance = sum((b - mean_basis) ** 2 for b in bases) / len(bases)
+        std_basis = variance ** 0.5
+        current_basis = history[-1][1]
+        current_z = (current_basis - mean_basis) / max(std_basis, 1e-9)
+
+        # Basis regime
+        # Positive basis = futures > spot (normal market, or backwardation depending on sign)
+        if current_basis > mean_basis + 2 * std_basis:
+            regime = "BASIS_WIDE"   # Futures premium unusually high vs spot
+        elif current_basis < mean_basis - 2 * std_basis:
+            regime = "BASIS_TIGHT"  # Futures premium unusually low
+        elif current_basis > mean_basis + std_basis:
+            regime = "ABOVE_AVERAGE"
+        elif current_basis < mean_basis - std_basis:
+            regime = "BELOW_AVERAGE"
+        else:
+            regime = "NEAR_AVERAGE"
+
+        # Trend: compare recent vs older window
+        mid = len(history) // 2
+        recent_mean = sum(bases[mid:]) / max(len(bases[mid:]), 1)
+        older_mean = sum(bases[:mid]) / max(len(bases[:mid]), 1)
+        trend = "WIDENING" if recent_mean > older_mean else "NARROWING"
+
+        return {
+            "futures_contract": futures_contract_id,
+            "lookback_days": lookback_days,
+            "data_points": len(history),
+            "current_basis": round(current_basis, 4),
+            "mean_basis": round(mean_basis, 4),
+            "std_basis": round(std_basis, 4),
+            "min_basis": round(min(bases), 4),
+            "max_basis": round(max(bases), 4),
+            "current_z_score": round(current_z, 3),
+            "regime": regime,
+            "trend": trend,
+            "mean_reversion_potential": (
+                "HIGH" if abs(current_z) > 1.5 else
+                "MEDIUM" if abs(current_z) > 0.5 else "LOW"
+            ),
+        }
+
+    def get_basis_trading_signal(
+        self,
+        futures_contract_id: str,
+    ) -> dict[str, Any]:
+        """Generate a trading signal for futures-spot basis (FT-08).
+
+        BUY signal → expect basis to widen (long futures, short spot)
+        SELL signal → expect basis to narrow (short futures, long spot)
+        NEUTRAL → no clear opportunity
+        """
+        ref = self.get_spot_reference_price(futures_contract_id)
+        hist = self.analyze_basis_history(futures_contract_id)
+
+        if "error" in ref or "error" in hist:
+            return {
+                "signal": "NO_DATA",
+                "futures_contract": futures_contract_id,
+            }
+
+        z = hist["current_z_score"]
+        regime = hist["regime"]
+        trend = hist["trend"]
+        basis_pct = ref["basis_pct"]
+        annualized_basis = ref["annualized_basis_pct"]
+        days_to_expiry = ref["days_to_expiry"]
+
+        score = 0.0
+        reasons: list[str] = []
+
+        # Z-score component (40%)
+        # Positive z = basis is historically wide → expect narrowing → SELL basis
+        if z > 2:
+            score += 0.4
+            reasons.append(f"Basis historically wide (z={z:.1f}) → expect narrowing")
+        elif z > 1:
+            score += 0.2
+            reasons.append(f"Basis above average (z={z:.1f})")
+        elif z < -2:
+            score -= 0.4
+            reasons.append(f"Basis historically tight (z={z:.1f}) → expect widening")
+        elif z < -1:
+            score -= 0.2
+            reasons.append(f"Basis below average (z={z:.1f})")
+
+        # Trend component (30%)
+        if trend == "NARROWING" and z > 0:
+            score += 0.3
+            reasons.append("Basis narrowing trend confirms short opportunity")
+        elif trend == "WIDENING" and z < 0:
+            score -= 0.3
+            reasons.append("Basis widening trend confirms long opportunity")
+
+        # Expiry proximity (20%)
+        # Near-expiry contracts have less roll opportunity
+        if days_to_expiry < 10:
+            score *= 0.5
+            reasons.append(f"Contract expires in {days_to_expiry} days — reduced roll opportunity")
+        elif days_to_expiry < 30:
+            reasons.append(f"Moderate time to expiry ({days_to_expiry} days)")
+
+        # Annualized basis component (10%)
+        if abs(annualized_basis) > 10:  # > 10% annualized basis
+            if annualized_basis > 0:
+                score += 0.1
+                reasons.append(f"High positive annualized basis {annualized_basis:.2f}% favors short spot")
+            else:
+                score -= 0.1
+                reasons.append(f"Negative annualized basis {annualized_basis:.2f}% favors long spot")
+
+        # Determine signal
+        if score >= 0.25:
+            signal = "SELL_BASIS"   # Short futures, long spot → profit when basis narrows
+            conviction = "HIGH" if score >= 0.6 else "MEDIUM"
+        elif score <= -0.25:
+            signal = "BUY_BASIS"    # Long futures, short spot → profit when basis widens
+            conviction = "HIGH" if score <= -0.6 else "MEDIUM"
+        else:
+            signal = "NEUTRAL"
+            conviction = "LOW"
+
+        return {
+            "signal": signal,
+            "conviction": conviction,
+            "futures_contract": futures_contract_id,
+            "spot_instrument_id": ref["spot_instrument_id"],
+            "score": round(score, 3),
+            "z_score": z,
+            "basis_pct": round(basis_pct, 4),
+            "annualized_basis_pct": round(annualized_basis, 4),
+            "regime": regime,
+            "trend": trend,
+            "days_to_expiry": days_to_expiry,
+            "reasons": reasons,
+            "timestamp": utc_now().isoformat(),
+        }
+
 
 _CONTRACT_NOTES: dict[str, dict[str, Any]] = {
     "IF2503": {"name": "沪深300股指", "summary": "跟踪沪深300指数的股指期货，是A股市场最重要的衍生品之一。", "category": "股指", "market_label": "中金所"},

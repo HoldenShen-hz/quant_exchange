@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from uuid import uuid4
 
 from quant_exchange.core.models import Alert, AlertSeverity, Direction, DirectionalBias, Instrument, Kline, Position, utc_now
@@ -224,6 +225,236 @@ class StrategyBotService:
             return []
         rows = self.persistence.fetch_all("ops_notifications", order_by="created_at DESC", limit=limit)
         return [row["payload"] for row in rows]
+
+    # ── BOT-06: Multi-Strategy Composite Bots ─────────────────────────────────
+
+    def create_composite_bot(
+        self,
+        *,
+        instrument_id: str,
+        bot_name: str | None = None,
+        mode: str = "paper",
+        sub_bot_configs: list[dict] | None = None,
+        auto_rebalance: bool = False,
+        rebalance_threshold: float = 0.15,
+    ) -> dict:
+        """Create a composite bot that combines multiple strategy sub-bots (BOT-06).
+
+        Args:
+            instrument_id: Target instrument for all sub-bots.
+            bot_name: Optional composite bot name.
+            sub_bot_configs: List of {"template_code": str, "weight": float, "params": dict}.
+                            Weights will be normalized to sum to 1.0.
+            auto_rebalance: Whether to auto-rebalance when any sub-bot exceeds
+                           its weight by rebalance_threshold.
+            rebalance_threshold: Fractional deviation that triggers rebalance.
+        """
+        sub_bot_configs = sub_bot_configs or []
+        total_weight = sum(cfg.get("weight", 1.0) for cfg in sub_bot_configs)
+        if total_weight <= 0:
+            raise ValueError("Weights must sum to a positive value")
+
+        # Normalize weights
+        normalized = []
+        for cfg in sub_bot_configs:
+            cfg = dict(cfg)
+            cfg["normalized_weight"] = cfg.pop("weight", 1.0) / total_weight
+            normalized.append(cfg)
+
+        composite_id = f"composite:{uuid4().hex[:12]}"
+        stock = self._stock(instrument_id)
+        composite_payload = {
+            "bot_id": composite_id,
+            "bot_name": bot_name or f"{stock['symbol']} 综合策略",
+            "type": "composite",
+            "instrument_id": instrument_id,
+            "symbol": stock["symbol"],
+            "mode": mode,
+            "status": "draft",
+            "sub_bots": [
+                {
+                    "sub_id": f"{composite_id}:sub:{i}",
+                    "template_code": cfg["template_code"],
+                    "weight": round(cfg["normalized_weight"], 4),
+                    "params": dict(cfg.get("params", {})),
+                    "status": "draft",
+                    "last_signal": None,
+                }
+                for i, cfg in enumerate(normalized)
+            ],
+            "auto_rebalance": auto_rebalance,
+            "rebalance_threshold": rebalance_threshold,
+            "created_at": _now(),
+            "started_at": None,
+            "updated_at": _now(),
+            "metrics": {
+                "composite_signal_weight": 0.0,
+                "best_sub_signal": None,
+                "worst_sub_signal": None,
+                "sub_signal_spread": 0.0,
+            },
+        }
+        self._save_bot(composite_payload)
+        self._emit_notification(
+            bot_id=composite_id,
+            level="info",
+            event_type="composite_bot_created",
+            title="综合机器人已创建",
+            message=f"{composite_payload['bot_name']} 已创建，包含 {len(normalized)} 个子策略。",
+        )
+        return composite_payload
+
+    def list_composite_bots(self) -> list[dict]:
+        """Return all composite (multi-strategy) bots."""
+        bots = self._load_bots()
+        return [b for b in bots if b.get("type") == "composite"]
+
+    def get_composite_metrics(self, composite_id: str) -> dict[str, Any]:
+        """Compute aggregate metrics across all sub-bots of a composite (BOT-06).
+
+        Includes weighted average signal, per-sub-bot signal, and deviation from
+        target weights.
+        """
+        composite = self._bot(composite_id)
+        if composite.get("type") != "composite":
+            raise ValueError("Bot is not a composite bot")
+
+        sub_weights: list[float] = []
+        sub_signals: list[float] = []
+        sub_statuses: list[str] = []
+
+        for sub in composite.get("sub_bots", []):
+            sub_weights.append(sub.get("weight", 0))
+            sig = sub.get("last_signal")
+            signal_val = (sig.get("target_weight") if sig else None) if isinstance(sig, dict) else 0.0
+            sub_signals.append(float(signal_val) if signal_val is not None else 0.0)
+            sub_statuses.append(sub.get("status", "unknown"))
+
+        # Weighted composite signal
+        composite_signal = sum(w * s for w, s in zip(sub_weights, sub_signals))
+
+        # Deviation from target weights
+        max_deviation = 0.0
+        for w, s in zip(sub_weights, sub_signals):
+            expected_w = abs(s)  # weight proportional to absolute signal
+            deviation = abs(w - expected_w)
+            max_deviation = max(max_deviation, deviation)
+
+        return {
+            "composite_id": composite_id,
+            "bot_name": composite.get("bot_name"),
+            "composite_signal_weight": round(composite_signal, 4),
+            "sub_count": len(sub_weights),
+            "sub_weights": [round(w, 4) for w in sub_weights],
+            "sub_signals": [round(s, 4) for s in sub_signals],
+            "sub_statuses": sub_statuses,
+            "max_weight_deviation": round(max_deviation, 4),
+            "needs_rebalance": (
+                composite.get("auto_rebalance", False) and
+                max_deviation > composite.get("rebalance_threshold", 0.15)
+            ),
+            "status": composite.get("status"),
+        }
+
+    def rebalance_composite_bot(
+        self,
+        composite_id: str,
+        new_weights: list[float] | None = None,
+        mode: str = "signal_proportional",
+    ) -> dict:
+        """Rebalance sub-bot weights in a composite bot (BOT-06).
+
+        Args:
+            composite_id: Composite bot to rebalance.
+            new_weights: Optional explicit weight list (must match sub-bot count).
+                         If None, rebalances by signal_proportional mode.
+            mode: "signal_proportional" (weights ∝ |signal|) or
+                  "equal" (equal weights) or "explicit" (use new_weights).
+        """
+        composite = self._bot(composite_id)
+        if composite.get("type") != "composite":
+            raise ValueError("Bot is not a composite bot")
+
+        sub_bots = composite.get("sub_bots", [])
+        n = len(sub_bots)
+
+        if mode == "equal":
+            weights = [1.0 / n] * n
+        elif mode == "signal_proportional":
+            signals = []
+            for sub in sub_bots:
+                sig = sub.get("last_signal")
+                val = abs((sig.get("target_weight") if sig else 0.0) if isinstance(sig, dict) else 0.0)
+                signals.append(val)
+            total = sum(signals)
+            weights = [s / total if total > 0 else 1.0 / n for s in signals]
+        elif mode == "explicit":
+            if not new_weights or len(new_weights) != n:
+                raise ValueError(f"new_weights must have exactly {n} entries")
+            total = sum(new_weights)
+            weights = [w / total for w in new_weights]
+        else:
+            raise ValueError(f"Unknown rebalance mode: {mode}")
+
+        # Update sub-bot weights
+        for i, sub in enumerate(sub_bots):
+            sub["weight"] = round(weights[i], 4)
+
+        composite["updated_at"] = _now()
+        self._save_bot(composite)
+        self._emit_notification(
+            bot_id=composite_id,
+            level="info",
+            event_type="composite_rebalanced",
+            title="综合机器人已调仓",
+            message=f"{composite['bot_name']} 已重新平衡，权重：{[round(w*100,1) for w in weights]}%。",
+        )
+        return self.get_composite_metrics(composite_id)
+
+    def start_composite_bot(self, composite_id: str) -> dict:
+        """Start all sub-bots within a composite bot (BOT-06)."""
+        composite = self._bot(composite_id)
+        if composite.get("type") != "composite":
+            raise ValueError("Bot is not a composite bot")
+
+        composite["status"] = "running"
+        composite["started_at"] = composite.get("started_at") or _now()
+        composite["updated_at"] = _now()
+
+        for sub in composite.get("sub_bots", []):
+            sub["status"] = "running"
+
+        self._save_bot(composite)
+        self._emit_notification(
+            bot_id=composite_id,
+            level="info",
+            event_type="composite_started",
+            title="综合机器人已启动",
+            message=f"{composite['bot_name']} 全部子策略已启动。",
+        )
+        return composite
+
+    def stop_composite_bot(self, composite_id: str) -> dict:
+        """Stop all sub-bots within a composite bot (BOT-06)."""
+        composite = self._bot(composite_id)
+        if composite.get("type") != "composite":
+            raise ValueError("Bot is not a composite bot")
+
+        composite["status"] = "stopped"
+        composite["updated_at"] = _now()
+
+        for sub in composite.get("sub_bots", []):
+            sub["status"] = "stopped"
+
+        self._save_bot(composite)
+        self._emit_notification(
+            bot_id=composite_id,
+            level="warning",
+            event_type="composite_stopped",
+            title="综合机器人已停止",
+            message=f"{composite['bot_name']} 全部子策略已停止。",
+        )
+        return composite
 
     def _refresh_bot(self, bot: dict) -> dict:
         """Recompute the latest signal and runtime metrics for one bot."""

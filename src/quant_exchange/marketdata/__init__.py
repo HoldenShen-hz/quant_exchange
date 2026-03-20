@@ -1,5 +1,6 @@
 """Market data ingestion and query services."""
 
+from .features import CrossSectionalFeatures, FeaturePipeline, FeatureVector
 from .service import DataQualityIssue, DataQualityStatus, MarketDataStore, Subscription
 
 __all__ = [
@@ -7,4 +8,7 @@ __all__ = [
     "DataQualityIssue",
     "DataQualityStatus",
     "Subscription",
+    "FeaturePipeline",
+    "FeatureVector",
+    "CrossSectionalFeatures",
 ]

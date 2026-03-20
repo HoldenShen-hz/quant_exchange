@@ -1278,6 +1278,281 @@ class ReportingService:
             "generated_at": utc_now().isoformat(),
         }
 
+    # ── RP-04: Anomaly Detection in Attribution Reports ──────────────────────
+
+    def detect_return_outliers(
+        self,
+        returns: list[float],
+        *,
+        z_threshold: float = 3.0,
+        window: int = 20,
+    ) -> dict[str, Any]:
+        """Detect statistical outliers in a return series (RP-04).
+
+        Uses rolling z-score to flag returns that deviate significantly
+        from recent history.
+        """
+        if len(returns) < window + 1:
+            return {"outliers": [], "outlier_count": 0, "window": window}
+
+        outliers = []
+        for i in range(window, len(returns)):
+            window_returns = returns[i - window:i]
+            w_mean = sum(window_returns) / len(window_returns)
+            variance = sum((r - w_mean) ** 2 for r in window_returns) / len(window_returns)
+            w_std = variance ** 0.5
+            if w_std == 0:
+                continue
+            z = (returns[i] - w_mean) / w_std
+            if abs(z) > z_threshold:
+                outliers.append({
+                    "index": i,
+                    "return": round(returns[i], 6),
+                    "z_score": round(z, 3),
+                    "direction": "positive" if returns[i] > 0 else "negative",
+                    "severity": (
+                        "EXTREME" if abs(z) > 5 else
+                        "SEVERE" if abs(z) > 4 else
+                        "MODERATE"
+                    ),
+                })
+
+        return {
+            "outliers": outliers,
+            "outlier_count": len(outliers),
+            "total_observations": len(returns),
+            "outlier_rate_pct": round(len(outliers) / max(len(returns) - window, 1) * 100, 3),
+            "window": window,
+            "z_threshold": z_threshold,
+        }
+
+    def detect_risk_contribution_anomalies(
+        self,
+        positions: dict[str, Position],
+        historical_risk: dict[str, float] | None = None,
+        threshold_pct: float = 0.50,
+    ) -> dict[str, Any]:
+        """Detect when risk contributions drift from historical norms (RP-04).
+
+        Args:
+            positions: Current positions.
+            historical_risk: Dict of instrument_id → historical risk pct.
+            threshold_pct: Fractional change threshold to flag as anomaly.
+        """
+        total_exposure = sum(abs(p.last_price * p.quantity) for p in positions.values())
+        if total_exposure == 0:
+            return {"anomalies": [], "note": "No exposure"}
+
+        current_risk: dict[str, float] = {}
+        for pos in positions.values():
+            if not pos.instrument_id:
+                continue
+            exposure = abs(pos.last_price * pos.quantity)
+            current_risk[pos.instrument_id] = exposure / total_exposure
+
+        anomalies = []
+        if historical_risk:
+            all_instruments = set(current_risk) | set(historical_risk)
+            for iid in all_instruments:
+                curr = current_risk.get(iid, 0.0)
+                hist = historical_risk.get(iid, 0.0)
+                if hist > 0:
+                    change = abs(curr - hist) / hist
+                    if change > threshold_pct:
+                        anomalies.append({
+                            "instrument_id": iid,
+                            "current_risk_pct": round(curr * 100, 3),
+                            "historical_risk_pct": round(hist * 100, 3),
+                            "change_pct": round(change * 100, 3),
+                            "direction": "increased" if curr > hist else "decreased",
+                            "severity": (
+                                "CRITICAL" if change > 1.0 else
+                                "HIGH" if change > 0.5 else
+                                "MEDIUM"
+                            ),
+                        })
+
+        return {
+            "anomalies": anomalies,
+            "anomaly_count": len(anomalies),
+            "current_risk_contribution": {
+                iid: round(v * 100, 3) for iid, v in current_risk.items()
+            },
+            "threshold_pct": round(threshold_pct * 100, 2),
+        }
+
+    def detect_sector_drift_anomalies(
+        self,
+        positions: dict[str, Position],
+        target_sector_allocation: dict[str, float] | None = None,
+        sector_mapping: dict[str, str] | None = None,
+        drift_threshold_pct: float = 0.30,
+    ) -> dict[str, Any]:
+        """Detect sector allocation drift from targets (RP-04).
+
+        Args:
+            positions: Current positions.
+            target_sector_allocation: Dict of sector → target weight (fractions summing to 1).
+            sector_mapping: instrument_id → sector name.
+            drift_threshold_pct: Maximum allowed deviation from target per sector.
+        """
+        sector_mapping = sector_mapping or {}
+        sector_exposure: dict[str, float] = {}
+        total_exposure = 0.0
+
+        for pos in positions.values():
+            sector = sector_mapping.get(pos.instrument_id, "Unknown")
+            exposure = abs(pos.last_price * pos.quantity)
+            sector_exposure[sector] = sector_exposure.get(sector, 0.0) + exposure
+            total_exposure += exposure
+
+        if total_exposure == 0:
+            return {"anomalies": [], "note": "No exposure"}
+
+        current_allocation = {
+            s: e / total_exposure for s, e in sector_exposure.items()
+        }
+
+        anomalies = []
+        if target_sector_allocation:
+            all_sectors = set(current_allocation) | set(target_sector_allocation)
+            for sector in all_sectors:
+                curr = current_allocation.get(sector, 0.0)
+                target = target_sector_allocation.get(sector, 0.0)
+                drift = curr - target
+                if abs(drift) > drift_threshold_pct:
+                    anomalies.append({
+                        "sector": sector,
+                        "current_allocation_pct": round(curr * 100, 3),
+                        "target_allocation_pct": round(target * 100, 3),
+                        "drift_pct": round(drift * 100, 3),
+                        "direction": "overweight" if drift > 0 else "underweight",
+                        "severity": (
+                            "CRITICAL" if abs(drift) > 0.15 else
+                            "HIGH" if abs(drift) > 0.10 else
+                            "MEDIUM"
+                        ),
+                    })
+
+        return {
+            "anomalies": anomalies,
+            "anomaly_count": len(anomalies),
+            "current_allocation": {
+                s: round(v * 100, 3) for s, v in current_allocation.items()
+            },
+            "target_allocation": (
+                {s: round(v * 100, 3) for s, v in target_sector_allocation.items()}
+                if target_sector_allocation else {}
+            ),
+            "drift_threshold_pct": round(drift_threshold_pct * 100, 2),
+        }
+
+    def generate_anomaly_report(
+        self,
+        returns: list[float] | None = None,
+        positions: dict[str, Position] | None = None,
+        historical_risk: dict[str, float] | None = None,
+        target_sector_allocation: dict[str, float] | None = None,
+        sector_mapping: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Generate a comprehensive anomaly detection report (RP-04).
+
+        Combines return outliers, risk contribution drift, and sector allocation
+        drift into a single actionable report with severity scoring.
+        """
+        report_id = str(uuid.uuid4())
+        sections: dict[str, Any] = {}
+        critical_count = 0
+        high_count = 0
+        medium_count = 0
+
+        # Return outliers
+        if returns:
+            result = self.detect_return_outliers(returns)
+            sections["return_outliers"] = result
+            for o in result.get("outliers", []):
+                if o["severity"] == "EXTREME" or o["severity"] == "SEVERE":
+                    critical_count += 1
+                elif o["severity"] == "MODERATE":
+                    medium_count += 1
+
+        # Risk contribution drift
+        if positions:
+            result = self.detect_risk_contribution_anomalies(
+                positions, historical_risk
+            )
+            sections["risk_contribution_anomalies"] = result
+            for a in result.get("anomalies", []):
+                if a["severity"] == "CRITICAL":
+                    critical_count += 1
+                elif a["severity"] == "HIGH":
+                    high_count += 1
+                elif a["severity"] == "MEDIUM":
+                    medium_count += 1
+
+        # Sector drift
+        if positions:
+            result = self.detect_sector_drift_anomalies(
+                positions, target_sector_allocation, sector_mapping
+            )
+            sections["sector_drift_anomalies"] = result
+            for a in result.get("anomalies", []):
+                if a["severity"] == "CRITICAL":
+                    critical_count += 1
+                elif a["severity"] == "HIGH":
+                    high_count += 1
+                elif a["severity"] == "MEDIUM":
+                    medium_count += 1
+
+        total_anomalies = critical_count + high_count + medium_count
+        overall_severity = (
+            "CRITICAL" if critical_count > 0 else
+            "HIGH" if high_count > 0 else
+            "MEDIUM" if medium_count > 0 else
+            "NORMAL"
+        )
+
+        # Actionable recommendations
+        recommendations = []
+        if overall_severity in ("CRITICAL", "HIGH"):
+            recommendations.append({
+                "priority": "HIGH",
+                "action": "Review portfolio allocation immediately",
+                "reason": f"Portfolio has {critical_count} critical and {high_count} high severity anomalies",
+            })
+        if critical_count > 0:
+            recommendations.append({
+                "priority": "CRITICAL",
+                "action": "Consider de-risking or hedging extreme return outliers",
+                "reason": f"Detected {critical_count} extreme/severe return outliers",
+            })
+        if high_count > 0:
+            recommendations.append({
+                "priority": "MEDIUM",
+                "action": "Rebalance sector allocations toward targets",
+                "reason": f"{high_count} sector allocations exceed drift threshold",
+            })
+        if total_anomalies == 0:
+            recommendations.append({
+                "priority": "INFO",
+                "action": "No anomalies detected — portfolio within normal ranges",
+                "reason": "All metrics within statistical thresholds",
+            })
+
+        return {
+            "report_id": report_id,
+            "generated_at": utc_now().isoformat(),
+            "overall_severity": overall_severity,
+            "anomaly_summary": {
+                "critical": critical_count,
+                "high": high_count,
+                "medium": medium_count,
+                "total": total_anomalies,
+            },
+            "sections": sections,
+            "recommendations": recommendations,
+        }
+
 
 class ReportScheduler:
     """Schedule and manage daily report generation tasks."""

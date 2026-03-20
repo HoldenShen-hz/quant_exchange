@@ -477,6 +477,50 @@ class StockScreenerWebApp:
             bot_id = path[len("/api/bots/"):-len("/detail")]
             result = self.platform.api.get_strategy_bot_details(bot_id)
             return self._json(start_response, result)
+        # FT-08: Futures-spot basis arbitrage endpoints
+        if path == "/api/futures/basis" and method == "GET":
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            contract_id = query.get("contract_id", [None])[0]
+            if not contract_id:
+                return self._json(start_response, {"code": "BAD_REQUEST", "error": {"message": "contract_id is required."}}, status="400 Bad Request")
+            return self._json(start_response, self.platform.api.get_basis_data(contract_id))
+        if path == "/api/futures/basis/signal" and method == "GET":
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            contract_id = query.get("contract_id", [None])[0]
+            if not contract_id:
+                return self._json(start_response, {"code": "BAD_REQUEST", "error": {"message": "contract_id is required."}}, status="400 Bad Request")
+            return self._json(start_response, self.platform.api.get_basis_trading_signal(contract_id))
+        # BOT-06: Composite bot endpoints
+        if path == "/api/bots/composite" and method == "POST":
+            payload = self._read_json(environ)
+            result = self.platform.api.create_composite_bot(
+                instrument_id=payload.get("instrument_id"),
+                bot_name=payload.get("bot_name"),
+                mode=payload.get("mode", "paper"),
+                sub_bot_configs=payload.get("sub_bot_configs"),
+                auto_rebalance=payload.get("auto_rebalance", False),
+                rebalance_threshold=float(payload.get("rebalance_threshold", 0.15)),
+            )
+            return self._json(start_response, result)
+        if path == "/api/bots/composite" and method == "GET":
+            return self._json(start_response, self.platform.api.list_composite_bots())
+        if path == "/api/bots/composite/rebalance" and method == "POST":
+            payload = self._read_json(environ)
+            result = self.platform.api.rebalance_composite_bot(
+                composite_id=payload.get("composite_id", ""),
+                new_weights=payload.get("new_weights"),
+                mode=payload.get("mode", "signal_proportional"),
+            )
+            return self._json(start_response, result)
+        if path == "/api/bots/composite/start" and method == "POST":
+            payload = self._read_json(environ)
+            return self._json(start_response, self.platform.api.start_composite_bot(payload.get("composite_id", "")))
+        if path == "/api/bots/composite/stop" and method == "POST":
+            payload = self._read_json(environ)
+            return self._json(start_response, self.platform.api.stop_composite_bot(payload.get("composite_id", "")))
+        if path.startswith("/api/bots/composite/") and path.endswith("/metrics") and method == "GET":
+            composite_id = path[len("/api/bots/composite/"):-len("/metrics")]
+            return self._json(start_response, self.platform.api.get_composite_metrics(composite_id))
         if path == "/api/notifications" and method == "GET":
             query = parse_qs(environ.get("QUERY_STRING", ""))
             limit = int(query.get("limit", ["20"])[0])

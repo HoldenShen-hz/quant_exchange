@@ -1003,6 +1003,81 @@ class ControlPlaneAPI:
 
         return self._ok({"notifications": self.platform.bot_center.list_notifications(limit=limit)})
 
+    # ── FT-08: Futures-Spot Arbitrage ─────────────────────────────────────────
+
+    def get_basis_data(self, futures_contract_id: str) -> dict:
+        """Return futures-spot basis data for one contract (FT-08)."""
+        return self._ok(self.platform.futures_trading.get_spot_reference_price(futures_contract_id))
+
+    def get_basis_trading_signal(self, futures_contract_id: str) -> dict:
+        """Return basis trading signal for one contract (FT-08)."""
+        return self._ok(self.platform.futures_trading.get_basis_trading_signal(futures_contract_id))
+
+    # ── BOT-06: Composite Multi-Strategy Bots ──────────────────────────────────
+
+    def create_composite_bot(
+        self,
+        *,
+        instrument_id: str,
+        bot_name: str | None = None,
+        mode: str = "paper",
+        sub_bot_configs: list[dict] | None = None,
+        auto_rebalance: bool = False,
+        rebalance_threshold: float = 0.15,
+    ) -> dict:
+        """Create a composite bot combining multiple strategy sub-bots (BOT-06)."""
+        try:
+            payload = self.platform.bot_center.create_composite_bot(
+                instrument_id=instrument_id,
+                bot_name=bot_name,
+                mode=mode,
+                sub_bot_configs=sub_bot_configs,
+                auto_rebalance=auto_rebalance,
+                rebalance_threshold=rebalance_threshold,
+            )
+            return self._ok(payload)
+        except (KeyError, ValueError) as exc:
+            return self._error("BAD_REQUEST", str(exc))
+
+    def list_composite_bots(self) -> dict:
+        """Return all composite bots (BOT-06)."""
+        return self._ok({"composites": self.platform.bot_center.list_composite_bots()})
+
+    def get_composite_metrics(self, composite_id: str) -> dict:
+        """Return aggregate metrics for a composite bot (BOT-06)."""
+        try:
+            return self._ok(self.platform.bot_center.get_composite_metrics(composite_id))
+        except (KeyError, ValueError) as exc:
+            return self._error("NOT_FOUND", str(exc))
+
+    def rebalance_composite_bot(
+        self,
+        composite_id: str,
+        new_weights: list[float] | None = None,
+        mode: str = "signal_proportional",
+    ) -> dict:
+        """Rebalance sub-bot weights in a composite (BOT-06)."""
+        try:
+            return self._ok(self.platform.bot_center.rebalance_composite_bot(
+                composite_id, new_weights=new_weights, mode=mode
+            ))
+        except (KeyError, ValueError) as exc:
+            return self._error("BAD_REQUEST", str(exc))
+
+    def start_composite_bot(self, composite_id: str) -> dict:
+        """Start all sub-bots within a composite (BOT-06)."""
+        try:
+            return self._ok(self.platform.bot_center.start_composite_bot(composite_id))
+        except (KeyError, ValueError) as exc:
+            return self._error("NOT_FOUND", str(exc))
+
+    def stop_composite_bot(self, composite_id: str) -> dict:
+        """Stop all sub-bots within a composite (BOT-06)."""
+        try:
+            return self._ok(self.platform.bot_center.stop_composite_bot(composite_id))
+        except (KeyError, ValueError) as exc:
+            return self._error("NOT_FOUND", str(exc))
+
     def sync_klines(self, exchange_code: str, instrument_id: str, interval: str) -> dict:
         """Import bars from a registered market data adapter."""
 
