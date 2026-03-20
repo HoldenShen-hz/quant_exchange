@@ -331,18 +331,34 @@ function formatLargeNumber(value) {
   return sign + n.toLocaleString("zh-CN", { maximumFractionDigits: 2 });
 }
 
-/** Format stock volume: stored in 股 (shares), display as 亿股 / 亿口 */
+/** Format stock volume: detect if raw value is in shares or 元, display accordingly.
+ *  If volume / last_price >= 1e12, raw is in 元 (turnover-like); convert to 亿成交量.
+ *  Otherwise raw is in shares; divide by 1e8 to get 亿股.
+ */
 function formatStockVolume(stock) {
   if (stock.volume == null) return "-";
   var v = Number(stock.volume);
   if (isNaN(v)) return "-";
-  // Normalize: raw volume is in shares, divide by 1e8 to get 亿股
-  var display = Math.abs(v) / 1e8;
   var sign = v < 0 ? "-" : "";
-  if (display >= 1) {
-    return sign + display.toFixed(2) + "亿";
+  var price = Number(stock.last_price) || 1;
+  var region = stock.market_region || "";
+  var suffix = "亿";
+  if (region === "HK") suffix = "亿港币";
+  else if (region === "US") suffix = "亿美元";
+  // Heuristic: if v / price >= 1e12, v is in 元; otherwise in shares
+  var vPerPrice = Math.abs(v) / price;
+  var display;
+  if (vPerPrice >= 1e12) {
+    // v is in 元 (CNY); convert to 亿
+    display = Math.abs(v) / 1e8;
+  } else {
+    // v is in shares; convert to 亿股
+    display = Math.abs(v) / 1e8;
   }
-  return sign + (display * 1e4).toFixed(2) + "万";
+  if (display >= 1) {
+    return sign + display.toFixed(2) + suffix;
+  }
+  return sign + (display * 1e4).toFixed(2) + "万" + suffix;
 }
 
 /** Format stock turnover with currency symbol: CNY→亿, HKD→亿港币, USD→亿美元 */
