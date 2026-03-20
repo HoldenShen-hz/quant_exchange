@@ -1,11 +1,11 @@
 # TODO: 未完成功能清单
 
 > 基于 doc/ 全部需求文档与代码库的逐项审计，截至 2026-03-20
-> 整体完成度约 92%（本次更新：ST-08 DSL API、EX-07/SE-03/MT-05/MD-05完成）
+> 整体完成度约 93%（本次更新：EX-08高级EMS完成）
 
 ---
 
-## 一、核心交易链路（P0）— 完成度 ~92%
+## 一、核心交易链路（P0）— 完成度 ~93%
 
 ### 1.1 已完成
 - [x] MD-01~MD-07: 多源行情接入、历史数据、统一模型、查询API
@@ -34,7 +34,7 @@
 | PP-06 | 回测-实盘漂移分析 | YES | drift_score(复合漂移分)、slippage_analysis(逐笔滑点分析)、signal_divergence(信号方向偏离检测)、drift_recommendations(可操作建议) |
 | EX-06 | 三级权限审批 | YES | ApprovalService实现，L1(操作员)/L2(风控)/L3(合规+风控)三级审批流，支持approve/reject/cancel/expiry，审计日志完整 |
 | EX-07 | 异常处理(全链路) | YES | ErrorRecoveryService实现，指数退避重试(+jitter)、每操作熔断器(CLOSED/OPEN/HALF_OPEN)、5类错误分类(网络/限速/服务端/客户端/致命)、RecoveryResult含recovered/circuit_open/fallback_used、Fallback策略注册、sys_error_recovery_log持久化 |
-| EX-08 | 高级OMS/EMS | NO | 未实现 |
+| EX-08 | 高级OMS/EMS | YES | ExecutionAlgorithmService实现TWAP/VWAP/POV/Iceberg算法，TWAP等分时间片，VWAP按成交量比例分布，POV按比例参与，Iceberg隐藏量分片，SmartOrderRouter多交易所路由，submit_algorithm_order API端点，完整审计日志 |
 | RK-06 | 黑天鹅保护 | YES | Cornish-Fisher VaR(偏度/峰度调整)、Expected Shortfall(CVaR)、check_circuit_breakers(L1/L2/L3熔断)、detect_correlation_spike(滚动相关阵)、calculate_conditional_drawdown_risk(CDaR) |
 | PF-05 | 归因分析 | YES | volatility_attribution(边际波动贡献分解)、drawdown_attribution(回撤期持仓归因)、sector_brinson_attribution(行业Brinson归因含instrument breakdown) |
 | PF-06 | 多账户管理 | YES | MultiAccountAllocator实现，账户层级/转账/统一资金分配/自动再平衡，支持父子账户关系 |
