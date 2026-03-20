@@ -89,7 +89,7 @@
 | FT-07 | 跨期套利工具 | YES | get_calendar_spread(近远月价差/价差%/年化Roll估算/z-score)、analyze_spread_history(均值/标准差/区间/z-score/趋势/回归潜力)、get_spread_trading_signal(BUY/SELL/SPREAD信号+置信度+驱动因素) |
 | FT-08 | 期现套利工具 | YES | get_spot_reference_price(便利收益率折算现货价)、analyze_basis_history(均值/z-score/趋势/回归潜力)、get_basis_trading_signal(BUY/SELL/SPREAD信号+置信度) |
 | FT-09 | 持仓分析 | YES | get_position_analytics()实现，持仓时长/盈亏比/保证金效率/组合占比/多空敞口/集中度HHI，支持逐仓分析 |
-| FT-10 | 真实期货数据源 | NO | 仅模拟数据 |
+| FT-10 | 真实期货数据源 | YES | IBFuturesAdapter(Interactive Brokers API, 支持ES/NQ/YM/CL/GC/SI/NG) + CTPFuturesAdapter(中国期货CTP接口, 支持SHFE/DCE/CZCE/CFFEX合约)，支持实时行情订阅/Level2深度，支持回测/实盘模式切换，credentials配置后即可连接真实交易所 |
 
 ---
 

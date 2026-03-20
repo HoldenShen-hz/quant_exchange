@@ -23,6 +23,14 @@ from .simulated import (
     SimulatedEquityBrokerAdapter,
     SimulatedFuturesBrokerAdapter,
 )
+from .futures import (
+    CTPFuturesAdapter,
+    FuturesContract,
+    FuturesDataAdapter,
+    FuturesExchange,
+    IBFuturesAdapter,
+    MarketDepth,
+)
 
 __all__ = [
     "AdapterRegistry",
@@ -31,6 +39,13 @@ __all__ = [
     "SimulatedCryptoExchangeAdapter",
     "SimulatedEquityBrokerAdapter",
     "SimulatedFuturesBrokerAdapter",
+    # Real futures adapters (FT-10)
+    "CTPFuturesAdapter",
+    "FuturesContract",
+    "FuturesDataAdapter",
+    "FuturesExchange",
+    "IBFuturesAdapter",
+    "MarketDepth",
     # Exchange adapters
     "BinanceRESTAdapter",
     "BinanceWebSocketAdapter",
