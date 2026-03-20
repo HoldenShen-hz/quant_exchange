@@ -1288,6 +1288,73 @@ class ControlPlaneAPI:
         )
         return self._ok(payload)
 
+    # ── ST-08 / DSL-01~DSL-05: QuantScript DSL ─────────────────────────────────
+
+    def compile_dsl_strategy(self, code: str, name: str = "") -> dict:
+        """Compile QuantScript DSL code to a strategy object (ST-08, DSL-01~DSL-05)."""
+
+        result = self.platform.dsl.compile(code, name)
+        if result.success:
+            self._audit(
+                actor="api",
+                action="compile_dsl_strategy",
+                resource="dsl:compile",
+                success=True,
+                details={"name": name, "strategy_id": getattr(result.compiled, "strategy_id", None)},
+            )
+            return self._ok({"strategy": self._serialize(result.compiled), "warnings": list(result.warnings or [])})
+        else:
+            self._audit(
+                actor="api",
+                action="compile_dsl_strategy",
+                resource="dsl:compile",
+                success=False,
+                details={"name": name, "error": result.error},
+            )
+            return self._error("DSL_COMPILE_ERROR", result.error or "Unknown compilation error")
+
+    def evaluate_dsl_expression(self, expression: str, data: dict | None = None) -> dict:
+        """Evaluate a QuantScript DSL expression against data (ST-08)."""
+
+        result = self.platform.dsl.evaluate(expression, data)
+        if result.success:
+            return self._ok({"result": result.output, "warnings": list(result.warnings or [])})
+        return self._error("DSL_EVAL_ERROR", result.error or "Unknown evaluation error")
+
+    def create_dsl_factor(
+        self,
+        name: str,
+        expression: str,
+        description: str = "",
+        author: str = "",
+        tags: list[str] | None = None,
+    ) -> dict:
+        """Create and register a DSL-defined factor (ST-08, DSL-02)."""
+
+        factor = self.platform.dsl.create_factor(name=name, expression=expression, description=description, author=author, tags=tags)
+        if factor:
+            self._audit(
+                actor="api",
+                action="create_dsl_factor",
+                resource=f"factor:{name}",
+                success=True,
+                details={"name": name, "expression": expression[:100]},
+            )
+            return self._ok({"factor": self._serialize(factor)})
+        return self._error("DSL_FACTOR_ERROR", "Failed to create factor - check expression syntax")
+
+    def list_dsl_strategies(self) -> dict:
+        """List all compiled DSL strategies (ST-08)."""
+        strategies = self.platform.dsl.get_all_strategies()
+        return self._ok({"strategies": [self._serialize(s) for s in strategies]})
+
+    def get_dsl_strategy(self, strategy_id: str) -> dict:
+        """Get one DSL strategy by ID (ST-08)."""
+        strategy = self.platform.dsl.get_strategy(strategy_id)
+        if strategy:
+            return self._ok({"strategy": self._serialize(strategy)})
+        return self._error("NOT_FOUND", f"Strategy {strategy_id} not found")
+
     def run_backtest(self, strategy_code: str, instrument_id: str, interval: str, initial_cash: float = 100_000.0) -> dict:
         """Execute a backtest through the platform services and persist the summary."""
 

@@ -935,6 +935,33 @@ class StockScreenerWebApp:
                     "ping": cache.ping(),
                 },
             })
+        # ── ST-08 / DSL-01~DSL-05: QuantScript DSL ──────────────────────
+        if path == "/api/dsl/compile" and method == "POST":
+            payload = self._read_json(environ)
+            return self._json(start_response, self.platform.api.compile_dsl_strategy(
+                code=payload.get("code", ""),
+                name=payload.get("name", ""),
+            ))
+        if path == "/api/dsl/evaluate" and method == "POST":
+            payload = self._read_json(environ)
+            return self._json(start_response, self.platform.api.evaluate_dsl_expression(
+                expression=payload.get("expression", ""),
+                data=payload.get("data"),
+            ))
+        if path == "/api/dsl/factor" and method == "POST":
+            payload = self._read_json(environ)
+            return self._json(start_response, self.platform.api.create_dsl_factor(
+                name=payload.get("name", ""),
+                expression=payload.get("expression", ""),
+                description=payload.get("description", ""),
+                author=payload.get("author", ""),
+                tags=payload.get("tags"),
+            ))
+        if path == "/api/dsl/strategies" and method == "GET":
+            return self._json(start_response, self.platform.api.list_dsl_strategies())
+        if path.startswith("/api/dsl/strategy/") and method == "GET":
+            strategy_id = path.split("/api/dsl/strategy/")[1]
+            return self._json(start_response, self.platform.api.get_dsl_strategy(strategy_id))
         # ── SSE Real-time Event Stream (WebSocket replacement) ──────────
         if path == "/api/events/stream" and method == "GET":
             return self._sse_stream(start_response)

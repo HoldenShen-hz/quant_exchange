@@ -23,6 +23,7 @@ from quant_exchange.enhanced import (
     AlternativeDataService,
     BiasAuditService,
     DerivativesDexService,
+    DSLService,
     FeatureStoreService,
     LedgerService,
     ReplayService,
@@ -95,6 +96,7 @@ class QuantTradingPlatform:
         self.alt_data = AlternativeDataService(self.persistence)
         self.advanced_execution = AdvancedExecutionService(self.persistence)
         self.derivatives_dex = DerivativesDexService(self.persistence)
+        self.dsl = DSLService(self.persistence)  # ST-08 / DSL-01~DSL-05: QuantScript DSL
         self.history_downloads = HistoryDownloadSupervisor(self._runtime_dir() / "history_downloads")
         self.stocks = StockDirectoryService(self.persistence, registrar=self.register_instrument)
         self.paper_trading = SimulatedTradingService(
