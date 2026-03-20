@@ -424,7 +424,7 @@ class StockDirectoryService:
                 order_by="bar_time DESC",
                 limit=limit,
             )
-            bars = [row["payload"] for row in reversed(rows)]
+            bars = [row["payload"] for row in reversed(rows) if row.get("payload")]
         return {
             "instrument_id": instrument_id,
             "symbol": self.profiles[instrument_id].symbol,
@@ -930,7 +930,10 @@ class StockDirectoryService:
             wick = open_price * volatility * (0.4 + rng.random() * 0.9)
             high_price = max(open_price, close_price) + wick
             low_price = max(min(open_price, close_price) - wick, 0.1)
-            volume = max((profile.market_cap or 5_000.0) * (0.12 + rng.random() * 0.38), 1.0)
+            # Estimate shares outstanding from market_cap (yuan) and last price (yuan/share)
+            shares_outstanding = max(profile.market_cap or 5_000.0, 1.0) / max(profile.last_price or 20.0, 0.1)
+            # Per-minute volume: 0.005% to 0.05% of shares outstanding (realistic intraday)
+            volume = max(shares_outstanding * (0.00005 + rng.random() * 0.00045), 100.0)
             turnover = volume * close_price
             generated.append(
                 {
