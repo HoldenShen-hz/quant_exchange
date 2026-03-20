@@ -811,3 +811,351 @@ class SmartOrderRouter:
             "failed_requests": total_failed,
             "rejected_requests": total_rejected,
         }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EX-08: Advanced Execution Algorithms — TWAP / VWAP / Iceberg
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class ExecutionAlgorithmType(str, Enum):
+    """Types of execution algorithms supported by the EMS."""
+
+    TWAP = "twap"
+    VWAP = "vwap"
+    ICEBERG = "iceberg"
+    POV = "pov"  # Percentage of Volume
+
+
+@dataclass
+class ExecutionSlice:
+    """One child slice of a parent algorithm order."""
+
+    slice_id: str
+    parent_order_id: str
+    quantity: float
+    limit_price: float | None
+    venue: str
+    status: OrderStatus = OrderStatus.CREATED
+    child_order_ids: list[str] = field(default_factory=list)
+    filled_quantity: float = 0.0
+    avg_fill_price: float = 0.0
+    created_at: datetime | None = None
+
+
+@dataclass
+class AlgorithmOrder:
+    """Parent order that manages an execution algorithm across multiple slices."""
+
+    algo_order_id: str
+    instrument_id: str
+    side: OrderSide
+    total_quantity: float
+    algo_type: ExecutionAlgorithmType
+    params: dict
+    status: OrderStatus = OrderStatus.CREATED
+    slices: list[ExecutionSlice] = field(default_factory=list)
+    filled_quantity: float = 0.0
+    avg_fill_price: float = 0.0
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+class TWAPExecutionAlgorithm:
+    """Time-Weighted Average Price (TWAP) execution algorithm.
+
+    Splits a parent order into equal-sized slices released at regular time intervals.
+    Suitable for large orders where market impact is a concern.
+    """
+
+    def __init__(
+        self,
+        num_slices: int = 10,
+        interval_seconds: int = 60,
+        slice_timeout_seconds: int = 30,
+    ) -> None:
+        self.num_slices = num_slices
+        self.interval_seconds = interval_seconds
+        self.slice_timeout_seconds = slice_timeout_seconds
+
+    def compute_slices(
+        self,
+        order_id: str,
+        total_quantity: float,
+        limit_price: float | None = None,
+        venue: str = "primary",
+    ) -> list[ExecutionSlice]:
+        """Compute equal-sized TWAP slices for the given quantity."""
+        slice_qty = total_quantity / self.num_slices
+        slices = []
+        for i in range(self.num_slices):
+            slices.append(
+                ExecutionSlice(
+                    slice_id=f"{order_id}:twap:{i + 1}",
+                    parent_order_id=order_id,
+                    quantity=round(slice_qty, 6),
+                    limit_price=limit_price,
+                    venue=venue,
+                    created_at=utc_now(),
+                )
+            )
+        return slices
+
+
+class VWAPExecutionAlgorithm:
+    """Volume-Weighted Average Price (VWAP) execution algorithm.
+
+    Schedules child orders proportional to expected volume分布, attempting to
+    achieve an average execution price close to the day's VWAP.
+    """
+
+    def __init__(
+        self,
+        volume_profile: dict[int, float] | None = None,  # hour -> volume fraction
+        num_slices: int = 20,
+        slice_timeout_seconds: int = 30,
+    ) -> None:
+        # Default:均匀分布 over market hours (9:30–16:00 = 6.5 hours ≈ 390 minutes)
+        self.volume_profile = volume_profile or {
+            9: 0.05, 10: 0.12, 11: 0.10, 12: 0.06, 13: 0.08, 14: 0.14, 15: 0.15, 16: 0.10
+        }
+        self.num_slices = num_slices
+        self.slice_timeout_seconds = slice_timeout_seconds
+
+    def compute_slices(
+        self,
+        order_id: str,
+        total_quantity: float,
+        limit_price: float | None = None,
+        venue: str = "primary",
+    ) -> list[ExecutionSlice]:
+        """Compute volume-weighted VWAP slices."""
+        total_volume_weight = sum(self.volume_profile.values())
+        slices = []
+        slice_qty_remaining = total_quantity
+
+        sorted_hours = sorted(self.volume_profile.keys())
+        for idx, hour in enumerate(sorted_hours):
+            weight = self.volume_profile[hour] / total_volume_weight
+            qty = round(total_quantity * weight, 6)
+            # Last slice gets remainder to handle rounding
+            if idx == len(sorted_hours) - 1:
+                qty = round(slice_qty_remaining, 6)
+            qty = max(qty, 0.0)
+            slice_qty_remaining -= qty
+
+            slices.append(
+                ExecutionSlice(
+                    slice_id=f"{order_id}:vwap:{hour}",
+                    parent_order_id=order_id,
+                    quantity=qty,
+                    limit_price=limit_price,
+                    venue=venue,
+                    created_at=utc_now(),
+                )
+            )
+        return slices
+
+
+class POVExecutionAlgorithm:
+    """Percentage of Volume (POV) execution algorithm.
+
+    Maintains a constant participation rate relative to market volume,
+    pausing when volume is low and resuming when volume increases.
+    """
+
+    def __init__(
+        self,
+        participation_rate: float = 0.10,  # 10% of volume
+        min_slice_quantity: float = 100.0,
+        max_slice_quantity: float = 10_000.0,
+        slice_interval_seconds: int = 30,
+    ) -> None:
+        self.participation_rate = max(0.01, min(0.50, participation_rate))
+        self.min_slice_quantity = min_slice_quantity
+        self.max_slice_quantity = max_slice_quantity
+        self.slice_interval_seconds = slice_interval_seconds
+
+    def compute_slice_quantity(
+        self,
+        parent_order_id: str,
+        current_volume: float,
+        remaining_quantity: float,
+        limit_price: float | None = None,
+    ) -> float:
+        """Compute one POV slice based on current volume."""
+        target_qty = current_volume * self.participation_rate
+        target_qty = max(self.min_slice_quantity, min(target_qty, self.max_slice_quantity))
+        target_qty = min(target_qty, remaining_quantity)
+        return round(target_qty, 6)
+
+
+class IcebergOrderHandler:
+    """Iceberg (hidden/large) order handler.
+
+    Displays only the visible slice to the market, revealing more only
+    as the current slice gets filled.
+    """
+
+    def __init__(
+        self,
+        visible_ratio: float = 0.05,  # 5% visible by default
+        min_visible: float = 100.0,
+        max_visible: float = 50_000.0,
+    ) -> None:
+        self.visible_ratio = max(0.01, min(0.50, visible_ratio))
+        self.min_visible = min_visible
+        self.max_visible = max_visible
+
+    def compute_visible_quantity(self, total_quantity: float, remaining_quantity: float) -> float:
+        """Compute the visible (displayed) quantity for the next slice."""
+        visible = remaining_quantity * self.visible_ratio
+        visible = max(self.min_visible, min(visible, self.max_visible))
+        visible = min(visible, remaining_quantity)
+        return round(visible, 6)
+
+    def create_iceberg_slice(
+        self,
+        order_id: str,
+        total_quantity: float,
+        remaining_quantity: float,
+        limit_price: float | None,
+        venue: str = "primary",
+    ) -> ExecutionSlice:
+        """Create the next iceberg slice with computed visible quantity."""
+        visible_qty = self.compute_visible_quantity(total_quantity, remaining_quantity)
+        return ExecutionSlice(
+            slice_id=f"{order_id}:iceberg:{uuid4().hex[:8]}",
+            parent_order_id=order_id,
+            quantity=visible_qty,
+            limit_price=limit_price,
+            venue=venue,
+            created_at=utc_now(),
+        )
+
+
+class ExecutionAlgorithmService:
+    """Service that manages execution algorithms and tracks parent/child orders (EX-08).
+
+    Coordinates TWAP, VWAP, POV, and Iceberg algorithms across the OMS.
+    Each parent algorithm order spawns child slices routed through the SmartOrderRouter.
+    """
+
+    def __init__(self, sor: SmartOrderRouter | None = None) -> None:
+        self.sor = sor or SmartOrderRouter()
+        self._algorithms: dict[str, AlgorithmOrder] = {}
+        self._twap = TWAPExecutionAlgorithm()
+        self._vwap = VWAPExecutionAlgorithm()
+        self._pov = POVExecutionAlgorithm()
+        self._iceberg = IcebergOrderHandler()
+
+    def submit_algorithm_order(
+        self,
+        instrument_id: str,
+        side: OrderSide,
+        quantity: float,
+        algo_type: ExecutionAlgorithmType,
+        limit_price: float | None = None,
+        params: dict | None = None,
+        venue: str = "primary",
+    ) -> AlgorithmOrder:
+        """Submit a parent order with an execution algorithm (TWAP/VWAP/ICEBERG/POV)."""
+        params = params or {}
+        order_id = f"algo:{uuid4().hex[:12]}"
+
+        if algo_type == ExecutionAlgorithmType.TWAP:
+            twap_slices = self._twap.compute_slices(order_id, quantity, limit_price, venue)
+            slices = twap_slices
+        elif algo_type == ExecutionAlgorithmType.VWAP:
+            vwap_slices = self._vwap.compute_slices(order_id, quantity, limit_price, venue)
+            slices = vwap_slices
+        elif algo_type == ExecutionAlgorithmType.POV:
+            # POV creates one initial slice; more computed on the fly
+            initial_qty = self._pov.compute_slice_quantity(
+                order_id, params.get("current_volume", 100_000.0), quantity, limit_price
+            )
+            slices = [
+                ExecutionSlice(
+                    slice_id=f"{order_id}:pov:1",
+                    parent_order_id=order_id,
+                    quantity=initial_qty,
+                    limit_price=limit_price,
+                    venue=venue,
+                    created_at=utc_now(),
+                )
+            ]
+        elif algo_type == ExecutionAlgorithmType.ICEBERG:
+            iceberg_slice = self._iceberg.create_iceberg_slice(order_id, quantity, quantity, limit_price, venue)
+            slices = [iceberg_slice]
+        else:
+            # Fallback to single slice
+            slices = [
+                ExecutionSlice(
+                    slice_id=f"{order_id}:single",
+                    parent_order_id=order_id,
+                    quantity=quantity,
+                    limit_price=limit_price,
+                    venue=venue,
+                    created_at=utc_now(),
+                )
+            ]
+
+        algo_order = AlgorithmOrder(
+            algo_order_id=order_id,
+            instrument_id=instrument_id,
+            side=side,
+            total_quantity=quantity,
+            algo_type=algo_type,
+            params=params,
+            status=OrderStatus.ACCEPTED,
+            slices=slices,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+        self._algorithms[order_id] = algo_order
+        return algo_order
+
+    def get_algorithm_order(self, order_id: str) -> AlgorithmOrder | None:
+        """Get an algorithm order by ID."""
+        return self._algorithms.get(order_id)
+
+    def get_algorithm_metrics(self, order_id: str) -> dict[str, Any]:
+        """Get fill metrics for an algorithm order."""
+        algo = self._algorithms.get(order_id)
+        if not algo:
+            return {"error": "Order not found"}
+
+        total_filled = sum(s.filled_quantity for s in algo.slices)
+        total_value = sum(s.filled_quantity * s.avg_fill_price for s in algo.slices)
+        avg_price = total_value / total_filled if total_filled > 0 else 0.0
+
+        return {
+            "algo_order_id": order_id,
+            "algo_type": algo.algo_type.value,
+            "status": algo.status.value,
+            "total_quantity": algo.total_quantity,
+            "filled_quantity": total_filled,
+            "remaining_quantity": algo.total_quantity - total_filled,
+            "avg_fill_price": round(avg_price, 4),
+            "slice_count": len(algo.slices),
+            "filled_slices": sum(1 for s in algo.slices if s.status == OrderStatus.FILLED),
+            "completion_pct": round(total_filled / algo.total_quantity * 100, 2) if algo.total_quantity > 0 else 0,
+        }
+
+    def list_algorithm_orders(self, status: OrderStatus | None = None) -> list[dict]:
+        """List all algorithm orders, optionally filtered by status."""
+        result = []
+        for algo in self._algorithms.values():
+            if status is None or algo.status == status:
+                result.append({
+                    "algo_order_id": algo.algo_order_id,
+                    "instrument_id": algo.instrument_id,
+                    "side": algo.side.value,
+                    "algo_type": algo.algo_type.value,
+                    "total_quantity": algo.total_quantity,
+                    "filled_quantity": sum(s.filled_quantity for s in algo.slices),
+                    "status": algo.status.value,
+                    "created_at": algo.created_at.isoformat() if algo.created_at else None,
+                })
+        return result

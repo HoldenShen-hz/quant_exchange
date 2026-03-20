@@ -37,7 +37,12 @@ from quant_exchange.enhanced.portfolio_allocators import (
     AttributionAnalyzer,
     MultiAccountAllocator,
 )
-from quant_exchange.execution.oms import OrderManager, PaperExecutionEngine
+from quant_exchange.execution.oms import (
+    ExecutionAlgorithmService,
+    OrderManager,
+    PaperExecutionEngine,
+    SmartOrderRouter,
+)
 from quant_exchange.ingestion.background_downloader import HistoryDownloadSupervisor
 from quant_exchange.intelligence.service import IntelligenceEngine
 from quant_exchange.learning import LearningHubService
@@ -79,6 +84,7 @@ class QuantTradingPlatform:
         self.security = SecurityService()
         self.portfolio = PortfolioManager()
         self.oms = OrderManager()
+        self.ems = ExecutionAlgorithmService(SmartOrderRouter())  # EX-08: TWAP/VWAP/POV/Iceberg algorithms
         self.paper_execution = PaperExecutionEngine()
         self.backtest = BacktestEngine()
         self.strategy_registry = StrategyRegistry()

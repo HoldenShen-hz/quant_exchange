@@ -1552,6 +1552,87 @@ class ControlPlaneAPI:
         )
         return self._ok({"order_id": order.order_id, "venue_response": venue_response})
 
+    # ── EX-08: Advanced EMS — TWAP/VWAP/POV/Iceberg ───────────────────────────
+
+    def submit_algorithm_order(
+        self,
+        exchange_code: str,
+        instrument_id: str,
+        side: str,
+        quantity: float,
+        algo_type: str,
+        limit_price: float | None = None,
+        params: dict | None = None,
+        venue: str = "primary",
+    ) -> dict:
+        """Submit an algorithm order (TWAP/VWAP/POV/ICEBERG) via the EMS (EX-08)."""
+        from quant_exchange.execution.oms import ExecutionAlgorithmType
+        try:
+            algo_enum = ExecutionAlgorithmType(algo_type.lower())
+        except ValueError:
+            return self._error("BAD_REQUEST", f"Unknown algo_type: {algo_type}. Valid: twap, vwap, pov, iceberg")
+
+        try:
+            order = self.platform.ems.submit_algorithm_order(
+                instrument_id=instrument_id,
+                side=OrderSide(side.upper()),
+                quantity=quantity,
+                algo_type=algo_enum,
+                limit_price=limit_price,
+                params=params or {},
+                venue=venue,
+            )
+            self._audit(
+                actor="api",
+                action="submit_algorithm_order",
+                resource=f"ems:{exchange_code}:{instrument_id}",
+                success=True,
+                details={
+                    "algo_order_id": order.algo_order_id,
+                    "algo_type": algo_type,
+                    "instrument_id": instrument_id,
+                    "quantity": quantity,
+                    "slice_count": len(order.slices),
+                },
+            )
+            return self._ok({
+                "algo_order_id": order.algo_order_id,
+                "algo_type": algo_type,
+                "status": order.status.value,
+                "instrument_id": instrument_id,
+                "total_quantity": order.total_quantity,
+                "slices": [
+                    {
+                        "slice_id": s.slice_id,
+                        "quantity": s.quantity,
+                        "limit_price": s.limit_price,
+                        "venue": s.venue,
+                    }
+                    for s in order.slices
+                ],
+            })
+        except Exception as exc:
+            self._audit(
+                actor="api",
+                action="submit_algorithm_order",
+                resource=f"ems:{exchange_code}:{instrument_id}",
+                success=False,
+                details={"algo_type": algo_type, "instrument_id": instrument_id, "reason": str(exc)},
+            )
+            return self._error("ALGORITHM_ORDER_FAILED", str(exc))
+
+    def get_algorithm_order(self, algo_order_id: str) -> dict:
+        """Get algorithm order status and metrics (EX-08)."""
+        order = self.platform.ems.get_algorithm_order(algo_order_id)
+        if not order:
+            return self._error("NOT_FOUND", f"Algorithm order {algo_order_id} not found")
+        return self._ok(self.platform.ems.get_algorithm_metrics(algo_order_id))
+
+    def list_algorithm_orders(self, status: str | None = None) -> dict:
+        """List all algorithm orders, optionally filtered by status (EX-08)."""
+        status_enum = OrderStatus(status.upper()) if status else None
+        return self._ok({"orders": self.platform.ems.list_algorithm_orders(status_enum)})
+
     def register_job(self, job_code: str, job_name: str, job_type: str, interval_seconds: int, callback) -> dict:
         """Register a scheduled job."""
 
