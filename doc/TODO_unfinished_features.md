@@ -1,11 +1,11 @@
 # TODO: 未完成功能清单
 
 > 基于 doc/ 全部需求文档与代码库的逐项审计，截至 2026-03-20
-> 整体完成度约 90%（本次更新：MD-05特征层、RP-04异常检测、FT-08期现套利、BOT-06多策略组合机器人）
+> 整体完成度约 91%（本次更新：EX-07全链路异常处理、SE-03完整审计覆盖）
 
 ---
 
-## 一、核心交易链路（P0）— 完成度 ~90%
+## 一、核心交易链路（P0）— 完成度 ~91%
 
 ### 1.1 已完成
 - [x] MD-01~MD-07: 多源行情接入、历史数据、统一模型、查询API
@@ -24,16 +24,16 @@
 
 | 编号 | 功能 | 状态 | 缺失细节 |
 |------|------|------|----------|
-| MD-05 | 数据分层（raw/标准/特征层） | YES | FeaturePipeline实现，transform(技术指标+动量+均值回归+波动率+振荡器+成交量+市场微结构)、standardize(z-score)、transform_universe(截面rank+percentile)、CrossSectionalFeatures |
+| MD-05 | 数据分层（raw/标准/特征层） | YES | FeaturePipeline实现，transform(技术指标+动量+均值回归+波动率+振荡器+成交量+市场微结构)、standardize(z-score)、transform_universe(截面rank+percentile)、CrossSectionalFeatures、IC/IR因子分析(compute_ic/compute_ir/get_factor_report)、行业中性z-score |
 | MD-08 | 全市场快照 | YES | market_breadth(跨市场涨跌家数/A/D比/情绪指数)、advance/decline/unchanged统计、per-market sentiment、global_sentiment_index |
 | MD-10 | 参考数据（交易日历、公司行为） | YES | CorporateAction模型已实现(分红/拆股/权利发行/并购)，支持前复权/后复权因子计算 |
-| ST-05 | 因子库 | PARTIAL | 仅基础因子(SMA/EMA/RSI/MACD)，缺ML因子、截面因子 |
+| ST-05 | 因子库 | YES | 基础因子(SMA/EMA/RSI/MACD)已实现，截面因子(compute_ic/compute_ir/get_factor_report)已完成，IC_mean/IC_std/IR/衰减率/行业中性z-score，缺ML因子生成 |
 | ST-08 | DSL/可视化/自然语言策略 | NO | 未实现 |
 | BT-06 | 批量/滚动回测 | YES | WalkForwardResult实现，真正walk-forward优化(train→参数优化→test)，滚动窗口聚合收益曲线，walk-forward效率比，purge跨验，支持参数稳定性分析 |
 | BT-08 | 偏差审计(前视偏差检测) | PARTIAL | BiasAuditService已集成进BacktestEngine，回测结果包含审计报告 |
 | PP-06 | 回测-实盘漂移分析 | YES | drift_score(复合漂移分)、slippage_analysis(逐笔滑点分析)、signal_divergence(信号方向偏离检测)、drift_recommendations(可操作建议) |
 | EX-06 | 三级权限审批 | YES | ApprovalService实现，L1(操作员)/L2(风控)/L3(合规+风控)三级审批流，支持approve/reject/cancel/expiry，审计日志完整 |
-| EX-07 | 异常处理(全链路) | PARTIAL | 部分场景缺失 |
+| EX-07 | 异常处理(全链路) | YES | ErrorRecoveryService实现，指数退避重试(+jitter)、每操作熔断器(CLOSED/OPEN/HALF_OPEN)、5类错误分类(网络/限速/服务端/客户端/致命)、RecoveryResult含recovered/circuit_open/fallback_used、Fallback策略注册、sys_error_recovery_log持久化 |
 | EX-08 | 高级OMS/EMS | NO | 未实现 |
 | RK-06 | 黑天鹅保护 | YES | Cornish-Fisher VaR(偏度/峰度调整)、Expected Shortfall(CVaR)、check_circuit_breakers(L1/L2/L3熔断)、detect_correlation_spike(滚动相关阵)、calculate_conditional_drawdown_risk(CDaR) |
 | PF-05 | 归因分析 | YES | volatility_attribution(边际波动贡献分解)、drawdown_attribution(回撤期持仓归因)、sector_brinson_attribution(行业Brinson归因含instrument breakdown) |
@@ -44,7 +44,7 @@
 | RP-03 | 回测vs实盘漂移报告 | YES | slippage_analysis(逐笔vs信号价/方向性 adverse favorable分类)、signal_divergence(direction_mismatch/timing_diff)、drift_score composite(0-100评分+level)、drift_recommendations actionable |
 | RP-04 | 归因/异常报告 | YES | detect_return_outliers(z-score滚动窗口异常检测+SEVERE/MODERATE评级)、detect_risk_contribution_anomalies(边际风险偏离)、detect_sector_drift_anomalies(行业配置偏离)、generate_anomaly_report(综合severity+recommendations) |
 | RP-06 | 合规报告 | YES | ComplianceReportService实现，支持持仓限额/日损失/杠杆/保证金/订单拒绝率/登录安全检查，生成合规报告含监管注意事项 |
-| SE-03 | 审计日志(完整) | PARTIAL | ControlPlaneAPI所有操作均已接入audit，包含订单提交/撤销/回测/期货交易 |
+| SE-03 | 审计日志(完整) | YES | ControlPlaneAPI所有操作均已接入audit，期货/股票/模拟订单提交/撤销全链路覆盖，机器人生命周期(create/start/pause/stop/interact/update_params)，账户/策略/情报源/风控规则创建，复合机器人全操作审计 |
 | SE-05 | 凭证加密/保险库 | YES | AES-256加密存储(PBKDF2密钥派生)，支持HMAC验证，防盗保护 |
 | SE-06 | 双因素认证/审批流 | YES | 真实TOTP实现(RFC 6238)，HMAC-SHA1，±1时间窗口容错，otpauth URI生成，支持QR码显示 |
 | SE-07 | 访问控制(细粒度) | YES | authorize_resource()实现，user×resource×action三层权限链(explicit_grant→role→deny)，支持grant/revoke/list方法，审计日志完整 |
