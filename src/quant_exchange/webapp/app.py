@@ -263,7 +263,10 @@ class _SSEResponse:
     def __next__(self):
         if not self._started:
             self._started = True
-        return next(self._gen)
+        data = next(self._gen)
+        if isinstance(data, str):
+            return data.encode("utf-8")
+        return data
 
     def close(self):
         """Called by WSGI server when response is complete."""
@@ -1201,7 +1204,6 @@ class StockScreenerWebApp:
         start_response("200 OK", [
             ("Content-Type", "text/event-stream; charset=utf-8"),
             ("Cache-Control", "no-cache"),
-            ("Connection", "keep-alive"),
             ("X-Accel-Buffering", "no"),
         ])
         return _SSEResponse(generate())
