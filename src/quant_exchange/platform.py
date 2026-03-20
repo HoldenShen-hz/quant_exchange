@@ -28,6 +28,7 @@ from quant_exchange.enhanced import (
     ResearchMlService,
     UniverseService,
 )
+from quant_exchange.enhanced.smart_screener import SmartScreenerService
 from quant_exchange.enhanced.portfolio_allocators import (
     PortfolioAllocatorService,
     RiskExposureAggregator,
@@ -98,6 +99,8 @@ class QuantTradingPlatform:
         )
         self.bot_center = StrategyBotService(self.persistence, self.stocks)
         self.web_workspace = WebWorkspaceService(self.persistence)
+        # SW-14: Smart Screener with NLP query support
+        self.smart_screener = SmartScreenerService(self.persistence)
         # PF-01~PF-06: Portfolio allocation and risk attribution
         self.portfolio_allocator = PortfolioAllocatorService(self.persistence)
         self.risk_exposure = RiskExposureAggregator()

@@ -46,6 +46,8 @@ const CHART_MODES = [
   { value: "candles", label: "K线" },
   { value: "line", label: "折线" },
   { value: "intraday", label: "分时" },
+  { value: "chip", label: "筹码" },
+  { value: "tpo", label: "TPO" },
 ];
 const REALTIME_ACTIVE_POLL_MS = 4000;
 const REALTIME_IDLE_POLL_MS = 30000;
@@ -1135,9 +1137,9 @@ function renderHistoryChart(payload, { containerId, statusId, mode }) {
       <line x1="${margin.left}" y1="${margin.top + pricePlotHeight}" x2="${width - margin.right}" y2="${margin.top + pricePlotHeight}" stroke="rgba(48,54,61,0.6)" />
       <line x1="${margin.left}" y1="${margin.top + pricePlotHeight + 12}" x2="${width - margin.right}" y2="${margin.top + pricePlotHeight + 12}" stroke="rgba(48,54,61,0.4)" />
       ${volumeBars}
-      ${mode === "candles" ? candles : `<path d="${linePath}" fill="none" stroke="#f08a24" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />`}
-      ${maPath(ma5, '#f0883e')}
-      ${maPath(ma10, '#58a6ff')}
+      ${mode === "candles" ? candles : mode === "chip" ? renderChipDistributionSVG(bars, { width, height, margin, plotWidth, plotHeight, pricePlotHeight, volumeHeight, maxHigh, minLow, priceRange, candleWidth, step }) : mode === "tpo" ? renderTPOChartSVG(bars, { width, height, margin, plotWidth, plotHeight, pricePlotHeight, volumeHeight, maxHigh, minLow, priceRange, candleWidth, step }) : `<path d="${linePath}" fill="none" stroke="#f08a24" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />`}
+      ${mode !== "tpo" && maPath(ma5, '#f0883e')}
+      ${mode !== "tpo" && maPath(ma10, '#58a6ff')}
       ${maPath(ma20, '#d2a8ff')}
       <text x="${margin.left}" y="${height - 10}" fill="#7d8590" font-size="12">${bars[0].trade_date}</text>
       <text x="${width - margin.right - 74}" y="${height - 10}" fill="#7d8590" font-size="12">${bars[bars.length - 1].trade_date}</text>
@@ -1268,6 +1270,247 @@ function renderKlineChart(payload) {
     const existingPanel = document.getElementById("indicator-panel");
     if (existingPanel) existingPanel.remove();
   }
+}
+
+/* ── CHART-05: Chip Distribution (筹码分布图) ─────────────────────── */
+function renderChipDistributionSVG(bars, { width, height, margin, plotWidth, plotHeight, pricePlotHeight, volumeHeight, maxHigh, minLow, priceRange, candleWidth, step }) {
+  if (!bars || bars.length === 0) return "";
+  const { top, right, bottom, left } = margin;
+
+  // Build a price-level histogram from the bars
+  // Each bar contributes its volume distributed across its price range
+  const NUM_BINS = 40;
+  const bins = Array.from({ length: NUM_BINS }, (_, i) => ({
+    priceLow: minLow + (priceRange * i) / NUM_BINS,
+    priceHigh: minLow + (priceRange * (i + 1)) / NUM_BINS,
+    volume: 0,
+  }));
+
+  for (const bar of bars) {
+    const barRange = bar.high - bar.low;
+    if (barRange <= 0) continue;
+    const avgPrice = (bar.high + bar.low + bar.close) / 3;
+    // Distribute volume proportionally to how much of the bar is in each bin
+    for (let i = 0; i < NUM_BINS; i++) {
+      const binLow = bins[i].priceLow;
+      const binHigh = bins[i].priceHigh;
+      const overlapLow = Math.max(bar.low, binLow);
+      const overlapHigh = Math.min(bar.high, binHigh);
+      if (overlapHigh > overlapLow) {
+        const overlapRatio = (overlapHigh - overlapLow) / barRange;
+        bins[i].volume += (bar.volume || 0) * overlapRatio;
+      }
+    }
+  }
+
+  const maxBinVol = Math.max(...bins.map(b => b.volume), 1);
+
+  // Price axis width and chip area
+  const priceAxisWidth = 60;
+  const chipAreaWidth = plotWidth - priceAxisWidth;
+  const barAreaWidth = chipAreaWidth - 30; // leave room for current price line
+
+  const priceToX = (p) => left + priceAxisWidth + ((maxHigh - p) / priceRange) * barAreaWidth;
+  const priceToChipX = (p) => left + priceAxisWidth + 15 + ((maxHigh - p) / priceRange) * barAreaWidth;
+  const chipBarHeight = Math.max((pricePlotHeight / NUM_BINS) - 1.5, 3);
+  const yForBin = (i) => top + (i / NUM_BINS) * pricePlotHeight;
+
+  let chipRects = "";
+  let priceLabels = "";
+
+  // Color gradient: red for above current price, green for below
+  const lastClose = bars[bars.length - 1].close;
+  const midIdx = Math.floor(NUM_BINS / 2);
+
+  for (let i = 0; i < NUM_BINS; i++) {
+    const bin = bins[i];
+    const barH = Math.max(chipBarHeight, 2);
+    const y = yForBin(i);
+    const barW = (bin.volume / maxBinVol) * barAreaWidth * 0.92;
+    const midPrice = (bin.priceLow + bin.priceHigh) / 2;
+    const isAbove = midPrice > lastClose;
+    const intensity = Math.min(bin.volume / (maxBinVol * 0.3), 1);
+    const color = isAbove
+      ? `rgba(248,81,73,${Math.max(0.15, Math.min(0.85, intensity))})`
+      : `rgba(63,185,80,${Math.max(0.15, Math.min(0.85, intensity))})`;
+
+    chipRects += `<rect x="${priceToChipX(bin.priceLow)}" y="${y}" width="${Math.max(barW, 2)}" height="${barH}" fill="${color}" rx="1" />`;
+
+    // Show price labels every 5 bins
+    if (i % 5 === 0) {
+      priceLabels += `<text x="${left + priceAxisWidth - 4}" y="${y + barH / 2 + 4}" fill="#7d8590" font-size="10" text-anchor="end">${formatNumber(midPrice)}</text>`;
+    }
+  }
+
+  // Current price line
+  const currentX = priceToChipX(lastClose);
+  const currentPriceLine = `
+    <line x1="${currentX}" y1="${top}" x2="${currentX}" y2="${top + pricePlotHeight}" stroke="#f0883e" stroke-width="1.5" stroke-dasharray="4 3" />
+    <rect x="${currentX - 24}" y="${top - 2}" width="48" height="16" fill="#f0883e" rx="3" />
+    <text x="${currentX}" y="${top + 11}" fill="white" font-size="10" text-anchor="middle" font-weight="600">${formatNumber(lastClose)}</text>
+  `;
+
+  // Grid lines
+  let gridLines = "";
+  for (let i = 0; i <= 4; i++) {
+    const y = top + (pricePlotHeight * i) / 4;
+    gridLines += `<line x1="${left + priceAxisWidth}" y1="${y}" x2="${width - right}" y2="${y}" stroke="rgba(48,54,61,0.35)" stroke-dasharray="3 5" />`;
+  }
+
+  // Value area markers (70% VA)
+  const sortedVolumes = bins.map(b => b.volume).sort((a, b) => b - a);
+  const totalVol = bins.reduce((s, b) => s + b.volume, 0);
+  let cumVol = 0;
+  let vaLowPrice = minLow, vaHighPrice = maxHigh;
+  for (const vol of sortedVolumes) {
+    cumVol += vol;
+    if (cumVol / totalVol > 0.85) break;
+    const binIdx = bins.findIndex(b => b.volume === vol);
+    const mid = (bins[binIdx].priceLow + bins[binIdx].priceHigh) / 2;
+    if (mid < lastClose) vaLowPrice = Math.max(mid, vaLowPrice);
+    else vaHighPrice = Math.min(mid, vaHighPrice);
+  }
+
+  return `
+    ${gridLines}
+    ${chipRects}
+    ${priceLabels}
+    ${currentPriceLine}
+    <line x1="${left + priceAxisWidth}" y1="${top}" x2="${left + priceAxisWidth}" y2="${top + pricePlotHeight}" stroke="rgba(48,54,61,0.6)" stroke-width="1" />
+    <!-- VA zone highlight -->
+    <rect x="${priceToChipX(vaHighPrice)}" y="${top}" width="${Math.abs(priceToChipX(vaLowPrice) - priceToChipX(vaHighPrice)))}" y2="${top + pricePlotHeight}" fill="rgba(240,136,62,0.06)" />
+    <text x="${width - right + 4}" y="${top + 12}" fill="#7d8590" font-size="10">85%VA</text>
+  `;
+}
+
+function renderKlineChart(payload) {
+  renderHistoryChart(payload, { containerId: "kline-card", statusId: "chart-status", mode: state.chartMode });
+  if (state.activeIndicator && payload.bars && payload.bars.length) {
+    fetchAndRenderIndicatorPanel(payload.bars);
+  } else {
+    const existingPanel = document.getElementById("indicator-panel");
+    if (existingPanel) existingPanel.remove();
+  }
+}
+
+/* ── CHART-07: TPO / Market Profile ─────────────────────────── */
+function renderTPOChartSVG(bars, { width, height, margin, plotWidth, plotHeight, pricePlotHeight, volumeHeight, maxHigh, minLow, priceRange, candleWidth, step }) {
+  if (!bars || bars.length === 0) return "";
+  const { top, right, left } = margin;
+
+  // TPO (Time Price Opportunity): group bars into time blocks (letters A-Z)
+  // Each "period" = 1 letter, showing which price levels were contested
+  const NUM_BINS = 30;
+  const NUM_PERIODS = Math.min(Math.ceil(bars.length / 4), 26); // max 26 letters (A-Z)
+  const periods = NUM_PERIODS;
+  const periodLabels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".slice(0, periods).split("");
+
+  // Build a TPO grid: tpoGrid[periodIdx][priceBinIdx] = true if contested
+  const tpoGrid = Array.from({ length: periods }, () => Array(NUM_BINS).fill(false));
+  const priceBinSize = priceRange / NUM_BINS;
+  const barStep = Math.max(Math.floor(bars.length / periods), 1);
+
+  for (let p = 0; p < periods; p++) {
+    const startBar = p * barStep;
+    const endBar = Math.min(startBar + barStep, bars.length);
+    for (let b = startBar; b < endBar; b++) {
+      const bar = bars[b];
+      const lowIdx = Math.floor((bar.low - minLow) / priceBinSize);
+      const highIdx = Math.ceil((bar.high - minLow) / priceBinSize);
+      for (let i = Math.max(0, lowIdx); i < Math.min(NUM_BINS, highIdx + 1); i++) {
+        tpoGrid[p][i] = true;
+      }
+    }
+  }
+
+  // Count TPO per price level
+  const tpoCounts = Array.from({ length: NUM_BINS }, (_, i) => {
+    let count = 0;
+    for (let p = 0; p < periods; p++) {
+      if (tpoGrid[p][i]) count++;
+    }
+    return count;
+  });
+  const maxTPO = Math.max(...tpoCounts, 1);
+  const maxHighIdx = Math.min(NUM_BINS - 1, Math.floor((maxHigh - minLow) / priceBinSize));
+
+  // Value Area: 70% of total TPO
+  const totalTPO = tpoCounts.reduce((s, c) => s + c, 0);
+  const vaTarget = totalTPO * 0.70;
+  let cumTPO = 0;
+  let vaMinCount = 0;
+  const sortedTPO = [...tpoCounts].sort((a, b) => b - a);
+  for (const cnt of sortedTPO) {
+    cumTPO += cnt;
+    if (cumTPO >= vaTarget) { vaMinCount = cnt; break; }
+  }
+  // find the outermost bins that meet VA threshold
+  let vaLowIdx = 0, vaHighIdx = NUM_BINS - 1;
+  for (let i = 0; i < NUM_BINS; i++) {
+    if (tpoCounts[i] >= vaMinCount) { vaLowIdx = Math.min(i, vaLowIdx); vaHighIdx = Math.max(i, vaHighIdx); }
+  }
+
+  // Layout: period labels (letters) on top, price axis on left
+  const periodLabelHeight = 22;
+  const priceAxisWidth = 60;
+  const totalChartHeight = pricePlotHeight + periodLabelHeight;
+  const periodColWidth = (plotWidth - priceAxisWidth) / periods;
+  const cellHeight = pricePlotHeight / NUM_BINS;
+
+  let gridRects = "";
+  let letterLabels = "";
+  let priceLabels = "";
+  const lastClose = bars[bars.length - 1].close;
+
+  for (let p = 0; p < periods; p++) {
+    const x = left + priceAxisWidth + p * periodColWidth;
+    letterLabels += `<text x="${x + periodColWidth / 2}" y="${top - 4}" fill="#7d8590" font-size="10" text-anchor="middle">${periodLabels[p]}</text>`;
+    for (let i = 0; i < NUM_BINS; i++) {
+      const y = top + i * cellHeight;
+      const contested = tpoGrid[p][i];
+      if (contested) {
+        const intensity = tpoCounts[i] / maxTPO;
+        const inVA = i >= vaLowIdx && i <= vaHighIdx;
+        const color = inVA
+          ? `rgba(240,136,62,${Math.max(0.3, Math.min(0.85, intensity))})`
+          : `rgba(88,166,255,${Math.max(0.15, Math.min(0.55, intensity))})`;
+        gridRects += `<rect x="${x + 1}" y="${y}" width="${Math.max(periodColWidth - 2, 2)}" height="${Math.max(cellHeight - 1, 2)}" fill="${color}" rx="0.5" />`;
+      }
+    }
+  }
+
+  // Price axis labels
+  for (let i = 0; i <= 4; i++) {
+    const price = minLow + (priceRange * i) / 4;
+    const y = top + pricePlotHeight - (pricePlotHeight * i) / 4;
+    priceLabels += `<text x="${left + priceAxisWidth - 4}" y="${y + 4}" fill="#7d8590" font-size="10" text-anchor="end">${formatNumber(price)}</text>`;
+  }
+
+  // Current price line
+  const lastCloseY = top + pricePlotHeight - ((lastClose - minLow) / priceRange) * pricePlotHeight;
+  const lastCloseX = left + priceAxisWidth + plotWidth - priceAxisWidth;
+
+  // Grid lines
+  let gridLines = "";
+  for (let i = 0; i <= 4; i++) {
+    const y = top + (pricePlotHeight * i) / 4;
+    gridLines += `<line x1="${left + priceAxisWidth}" y1="${y}" x2="${width - right}" y2="${y}" stroke="rgba(48,54,61,0.3)" stroke-dasharray="3 5" />`;
+  }
+
+  return `
+    ${gridLines}
+    <!-- Period labels -->
+    ${letterLabels}
+    <!-- TPO cells -->
+    ${gridRects}
+    <!-- Price labels -->
+    ${priceLabels}
+    <!-- Current price -->
+    <line x1="${left + priceAxisWidth}" y1="${lastCloseY}" x2="${width - right}" y2="${lastCloseY}" stroke="#f0883e" stroke-width="1.2" stroke-dasharray="4 3" />
+    <text x="${width - right + 3}" y="${lastCloseY + 4}" fill="#f0883e" font-size="10">${formatNumber(lastClose)}</text>
+    <!-- VA zone brackets -->
+    <text x="${left + priceAxisWidth + 2}" y="${top + 10}" fill="#f0883e" font-size="9">VA${vaTarget > 0 ? Math.round(vaTarget / totalTPO * 100) : 70}%</text>
+  `;
 }
 
 /* ── Indicator panels: MACD / KDJ / BOLL (CHART-02) ─────────────── */
@@ -1682,11 +1925,21 @@ async function loadFuturesDetail(instrumentId) {
   state.activeFuturesInstrumentId = instrumentId;
   try {
     var detail = await fetchJson("/api/futures/detail?instrument_id=" + encodeURIComponent(instrumentId));
-    if (detail.data) renderFuturesDetail(detail.data);
+    if (detail.data) {
+      renderFuturesDetail(detail.data);
+      // Update trading form with selected contract
+      var contractBadge = document.getElementById("futures-current-contract");
+      if (contractBadge) {
+        contractBadge.className = "inline-badge";
+        contractBadge.textContent = (detail.data.display_name || instrumentId) + " " + detail.data.symbol + " | 最新价: " + formatNumber(detail.data.last_price);
+      }
+    }
     var klines = await fetchJson("/api/futures/klines?instrument_id=" + encodeURIComponent(instrumentId) + "&limit=" + state.futuresChartRange);
     if (klines.data) renderFuturesChart(klines.data);
   } catch (err) {}
   renderFuturesWatchlist(state.futuresContracts);
+  // Also load futures trading data
+  await loadFuturesTrading();
 }
 
 function renderFuturesDetail(data) {
@@ -1726,6 +1979,129 @@ function renderFuturesChartControls() {
   modeContainer.innerHTML = modes.map(function (m) {
     return '<button class="mode-button' + (state.futuresChartMode === m.key ? " is-active" : "") + '" type="button" data-futures-chart-mode="' + m.key + '">' + m.label + "</button>";
   }).join("");
+}
+
+// ── FT-05: Futures Simulated Trading ──────────────────────────────────────────
+
+async function loadFuturesTrading() {
+  await Promise.all([
+    loadFuturesDashboard(),
+    loadFuturesPositions(),
+  ]);
+}
+
+async function loadFuturesDashboard() {
+  try {
+    var resp = await fetchJson("/api/futures/dashboard?account_code=futures_main");
+    if (resp.data) renderFuturesTradingDashboard(resp.data);
+  } catch (err) {
+    var summary = document.getElementById("futures-trading-summary");
+    if (summary) summary.textContent = "加载交易账户数据失败。";
+  }
+}
+
+async function loadFuturesPositions() {
+  try {
+    var resp = await fetchJson("/api/futures/positions?account_code=futures_main");
+    if (resp.data) renderFuturesPositions(resp.data);
+  } catch (err) {
+    var list = document.getElementById("futures-positions-list");
+    if (list) list.innerHTML = '<div class="empty-state">加载持仓失败。</div>';
+  }
+}
+
+function renderFuturesTradingDashboard(data) {
+  var container = document.getElementById("futures-trading-dashboard");
+  if (!container) return;
+  var cards = [
+    { title: "账户权益", value: formatNumber(data.current_equity), note: "初始 " + formatNumber(data.initial_equity) },
+    { title: "可用资金", value: formatNumber(data.cash_available), note: "保证金占用 " + formatNumber(data.margin_used) },
+    { title: "持仓盈亏", value: formatNumber(data.daily_pnl), note: "已实现 " + formatNumber(data.total_realized_pnl) },
+    { title: "持仓数量", value: String(data.position_count), note: "合约数" },
+  ];
+  container.innerHTML = cards.map(function (c) {
+    var isPos = c.title === "持仓盈亏" && parseFloat(c.value) >= 0;
+    var isNeg = c.title === "持仓盈亏" && parseFloat(c.value) < 0;
+    return '<div class="pulse-card"><h3>' + c.title + '</h3><strong' + (isPos ? ' class="metric-positive"' : isNeg ? ' class="metric-negative"' : '') + '>' + c.value + '</strong><p>' + c.note + '</p></div>';
+  }).join("");
+  var summary = document.getElementById("futures-trading-summary");
+  if (summary) summary.textContent = "账户 " + data.account_code + " · 持仓 " + data.position_count + " 个合约";
+}
+
+function renderFuturesPositions(data) {
+  var container = document.getElementById("futures-positions-list");
+  if (!container) return;
+  var positions = data.positions || [];
+  if (!positions.length) {
+    container.className = "futures-positions-list";
+    container.innerHTML = '<div class="empty-state">暂无持仓数据。</div>';
+    return;
+  }
+  container.className = "futures-positions-list";
+  container.innerHTML = positions.map(function (p) {
+    var pnlClass = p.unrealized_pnl >= 0 ? "metric-positive" : "metric-negative";
+    var dirLabel = p.direction === "long" ? "多" : "空";
+    return '<div class="futures-position-item">' +
+      '<div><strong>' + p.instrument_id + '</strong><br><span class="pos-direction ' + p.direction + '">' + dirLabel + '</span> × ' + p.quantity + '手</div>' +
+      '<div>入仓<br><strong>' + formatNumber(p.entry_price) + '</strong></div>' +
+      '<div>现价<br><strong>' + formatNumber(p.current_price) + '</strong></div>' +
+      '<div>浮动盈亏<br><strong class="' + pnlClass + '">' + formatNumber(p.unrealized_pnl) + '</strong></div>' +
+    '</div>';
+  }).join("");
+}
+
+async function submitFuturesOrder(evt) {
+  evt.preventDefault();
+  var instrumentId = state.activeFuturesInstrumentId;
+  var direction = document.getElementById("futures-order-direction").value;
+  var orderType = document.getElementById("futures-order-type").value;
+  var quantity = parseInt(document.getElementById("futures-order-quantity").value || 0);
+  var limitPriceField = document.getElementById("futures-order-price").value;
+  var feedback = document.getElementById("futures-order-feedback");
+
+  if (!instrumentId) {
+    feedback.className = "futures-feedback";
+    feedback.style.color = "var(--red)";
+    feedback.textContent = "请先在左侧合约列表选择一个期货合约。";
+    return;
+  }
+  if (quantity <= 0) {
+    feedback.className = "futures-feedback";
+    feedback.style.color = "var(--red)";
+    feedback.textContent = "数量必须大于0。";
+    return;
+  }
+
+  var payload = {
+    account_code: "futures_main",
+    instrument_id: instrumentId,
+    direction: direction,
+    quantity: quantity,
+    order_type: orderType,
+    limit_price: limitPriceField ? parseFloat(limitPriceField) : null,
+  };
+
+  try {
+    var resp = await postJson("/api/futures/orders", payload);
+    if (resp.data && resp.data.status === "filled") {
+      feedback.className = "futures-feedback";
+      feedback.style.color = "var(--green)";
+      feedback.textContent = direction === "long" ? "做多" : "做空" + quantity + "手 " + instrumentId + " 成交，均价 " + formatNumber(resp.data.avg_fill_price);
+      await Promise.all([loadFuturesDashboard(), loadFuturesPositions()]);
+    } else if (resp.data && resp.data.status === "rejected") {
+      feedback.className = "futures-feedback";
+      feedback.style.color = "var(--red)";
+      feedback.textContent = "订单被拒绝：保证金不足或参数错误。";
+    } else {
+      feedback.className = "futures-feedback";
+      feedback.style.color = "var(--muted)";
+      feedback.textContent = "订单状态：" + (resp.data ? resp.data.status : "未知");
+    }
+  } catch (err) {
+    feedback.className = "futures-feedback";
+    feedback.style.color = "var(--red)";
+    feedback.textContent = "提交失败：" + (err.message || "网络错误");
+  }
 }
 
 function describeEvent(event) {
@@ -2882,6 +3258,112 @@ function setupQuickTrade() {
   sellBtn.addEventListener("click", function () { doQuickTrade("sell"); });
 }
 
+/* ── CHART-03: Multi-cycle Linkage ─────────────────────────────────── */
+var _multicycleVisible = false;
+
+function toggleMultiCycle() {
+  _multicycleVisible = !_multicycleVisible;
+  var panel = document.getElementById("multicycle-panel");
+  if (!panel) return;
+  if (_multicycleVisible) {
+    panel.style.display = "block";
+    loadMultiCycleCharts();
+  } else {
+    panel.style.display = "none";
+  }
+}
+
+async function loadMultiCycleCharts() {
+  if (!state.activeInstrumentId) return;
+  var symbol = state.activeInstrumentId;
+  var container = document.getElementById("multicycle-charts");
+  if (!container) return;
+  container.innerHTML = '<div class="empty-state">正在加载多周期数据...</div>';
+  var periods = [
+    { label: "日线 (1D)", interval: "1d", limit: 60 },
+    { label: "4小时 (4H)", interval: "4h", limit: 60 },
+    { label: "1小时 (1H)", interval: "1h", limit: 80 },
+  ];
+  var summary = document.getElementById("multicycle-summary");
+  if (summary) summary.textContent = symbol + " 多周期走势联动";
+  var chartsHtml = "";
+  for (const p of periods) {
+    chartsHtml += '<div class="multicycle-chart-item" id="mc-chart-' + p.interval + '">' +
+      '<div class="mini-chart-header"><span>' + p.label + '</span><span class="mc-loading">加载中...</span></div>' +
+      '<div class="mc-chart-body"></div></div>';
+  }
+  container.innerHTML = chartsHtml;
+  // Load each period
+  for (const p of periods) {
+    try {
+      var resp = await fetchJson("/api/klines?instrument_id=" + encodeURIComponent(symbol) + "&interval=" + p.interval + "&limit=" + p.limit);
+      if (resp.data) {
+        renderMiniChart(resp.data, "mc-chart-" + p.interval, p.interval);
+      }
+    } catch(err) {}
+  }
+}
+
+function renderMiniChart(payload, containerId, interval) {
+  var container = document.getElementById(containerId);
+  if (!container || !payload.bars || !payload.bars.length) return;
+  var bars = payload.bars;
+  var width = container.clientWidth || 800;
+  var height = 160;
+  var margin = { top: 8, right: 50, bottom: 24, left: 8 };
+  var plotWidth = width - margin.left - margin.right;
+  var plotHeight = height - margin.top - margin.bottom;
+  var maxHigh = Math.max(...bars.map(b => b.high));
+  var minLow = Math.min(...bars.map(b => b.low));
+  var priceRange = Math.max(maxHigh - minLow, 0.01);
+  var step = plotWidth / bars.length;
+  var candleW = Math.max(step * 0.65, 2);
+  var priceY = (p) => margin.top + ((maxHigh - p) / priceRange) * plotHeight;
+  var barX = (i) => margin.left + step * i + step / 2;
+  var candles = bars.map((bar, i) => {
+    var x = barX(i) - candleW / 2;
+    var openY = priceY(bar.open);
+    var closeY = priceY(bar.close);
+    var highY = priceY(bar.high);
+    var lowY = priceY(bar.low);
+    var bodyY = Math.min(openY, closeY);
+    var bodyH = Math.max(Math.abs(openY - closeY), 1.5);
+    var color = bar.close >= bar.open ? "#3fb950" : "#f85149";
+    return '<line x1="' + barX(i) + '" y1="' + highY + '" x2="' + barX(i) + '" y2="' + lowY + '" stroke="' + color + '" stroke-width="1"/><rect x="' + x + '" y="' + bodyY + '" width="' + candleW + '" height="' + bodyH + '" fill="' + color + '" rx="1"/>';
+  }).join("");
+  var volH = plotHeight * 0.18;
+  var maxVol = Math.max(...bars.map(b => b.volume || 0), 1);
+  var volY = (v) => margin.top + plotHeight - ((v / maxVol) * volH);
+  var volumes = bars.map((bar, i) => {
+    var vh = Math.max(margin.top + plotHeight - volY(bar.volume || 0), margin.top + plotHeight - volH);
+    var color = bar.close >= bar.open ? "rgba(63,185,80,0.3)" : "rgba(248,81,73,0.3)";
+    return '<rect x="' + (barX(i) - candleW / 2) + '" y="' + volY(bar.volume || 0) + '" width="' + candleW + '" height="' + (margin.top + plotHeight - volY(bar.volume || 0)) + '" fill="' + color + '" rx="1"/>';
+  }).join("");
+  var gridLines = [0.25, 0.5, 0.75].map(r => {
+    var y = margin.top + plotHeight * r;
+    return '<line x1="' + margin.left + '" y1="' + y + '" x2="' + (width - margin.right) + '" y2="' + y + '" stroke="rgba(48,54,61,0.3)" stroke-dasharray="3 5"/>';
+  }).join("");
+  var body = container.querySelector(".mc-chart-body");
+  if (!body) return;
+  body.innerHTML = '<svg viewBox="0 0 ' + width + ' ' + height + '" width="100%" style="display:block;">' +
+    gridLines +
+    volumes +
+    candles +
+    '<text x="' + margin.left + '" y="' + (height - 6) + '" fill="#7d8590" font-size="10">' + bars[0].trade_date + '</text>' +
+    '<text x="' + (width - margin.right - 40) + '" y="' + (height - 6) + '" fill="#7d8590" font-size="10">' + bars[bars.length-1].trade_date + '</text>' +
+    '<text x="' + (width - margin.right - 40) + '" y="' + (margin.top + 12) + '" fill="#7d8590" font-size="10">' + formatNumber(maxHigh) + '</text>' +
+    '<text x="' + (width - margin.right - 40) + '" y="' + (margin.top + plotHeight - 2) + '" fill="#7d8590" font-size="10">' + formatNumber(minLow) + '</text>' +
+  '</svg>';
+  var header = container.querySelector(".mc-loading");
+  if (header) header.textContent = formatNumber(bars[bars.length-1].close) + " " + (bars[bars.length-1].close >= bars[0].open ? "+" : "") + formatNumber(((bars[bars.length-1].close - bars[0].open) / bars[0].open * 100)) + "%";
+}
+
+document.getElementById("multicycle-close").addEventListener("click", function() {
+  _multicycleVisible = false;
+  var panel = document.getElementById("multicycle-panel");
+  if (panel) panel.style.display = "none";
+});
+
 function updateQuickTradeBar() {
   var symEl = document.getElementById("quick-trade-symbol");
   var priceEl = document.getElementById("quick-trade-price");
@@ -3122,6 +3604,13 @@ function renderChartControls() {
   const indContainer = document.getElementById("chart-indicator-buttons");
   if (indContainer) {
     indContainer.insertAdjacentHTML("afterend", drawingHtml);
+  }
+  // CHART-03: Multi-cycle linkage button
+  const multicycleBtn = document.getElementById("multicycle-toggle-btn");
+  if (multicycleBtn) {
+    multicycleBtn.addEventListener("click", function() {
+      toggleMultiCycle();
+    });
   }
 }
 
@@ -4175,6 +4664,14 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  // SW-14: AI screener result click
+  const viewStock = event.target.closest("[data-view-stock]");
+  if (viewStock) {
+    await loadDetail(viewStock.dataset.viewStock, { persist: true });
+    await setActiveTab("research", { persist: true, log: true });
+    return;
+  }
+
   const presetButton = event.target.closest("[data-preset]");
   if (presetButton) {
     await setActiveTab("screener");
@@ -4291,6 +4788,11 @@ document.addEventListener("click", async (event) => {
     if (state.activeFuturesInstrumentId) loadFuturesDetail(state.activeFuturesInstrumentId);
     return;
   }
+  var futuresRefresh = event.target.closest("[data-futures-refresh-trading]");
+  if (futuresRefresh) {
+    loadFuturesTrading();
+    return;
+  }
 
   /* F10 sub-tab clicks */
   const subTabBtn = event.target.closest("[data-subtab]");
@@ -4396,6 +4898,72 @@ document.getElementById("reset-filters").addEventListener("click", async () => {
   await loadStocks({ persist: true, eventType: "reset_filters" });
 });
 
+// SW-14: AI Smart Screener
+var _lastAIScreenerId = null;
+
+document.getElementById("ai-screener-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  var query = document.getElementById("ai-screener-query").value.trim();
+  if (!query) return;
+  var summary = document.getElementById("ai-screener-summary");
+  summary.textContent = "AI 正在分析并筛选...";
+  var feedback = document.getElementById("ai-screener-results");
+  feedback.className = "ai-screener-results";
+  feedback.innerHTML = '<div class="empty-state">AI 正在筛选，请稍候...</div>';
+  try {
+    var resp = await postJson("/api/screener/ai", { query: query });
+    if (resp.data) {
+      _lastAIScreenerId = resp.data.results && resp.data.results[0] ? resp.data.results[0].screener_id : null;
+      renderAIScreenerResults(resp.data);
+      summary.textContent = "AI 筛选完成，共返回 " + resp.data.result_count + " 只股票";
+    } else {
+      summary.textContent = "AI 筛选失败：" + (resp.error && resp.error.message || "未知错误");
+    }
+  } catch (err) {
+    summary.textContent = "AI 筛选请求失败：" + err.message;
+    feedback.innerHTML = '<div class="empty-state">请求失败，请重试。</div>';
+  }
+});
+
+function renderAIScreenerResults(data) {
+  var feedback = document.getElementById("ai-screener-results");
+  var conditionsEl = document.getElementById("ai-screener-conditions");
+  if (!feedback) return;
+
+  // Render parsed conditions
+  if (conditionsEl) {
+    var conds = data.parsed_conditions || [];
+    var patterns = data.pattern_filters || [];
+    var tags = [];
+    conds.forEach(function(c) {
+      tags.push('<span class="ai-condition-tag">' + c.factor + ' ' + c.operator + ' ' + c.value + '</span>');
+    });
+    patterns.forEach(function(p) {
+      tags.push('<span class="ai-condition-tag">Pattern: ' + p + '</span>');
+    });
+    conditionsEl.innerHTML = tags.length ? '解析条件：' + tags.join('') : '';
+  }
+
+  // Render results
+  var results = data.results || [];
+  if (!results.length) {
+    feedback.innerHTML = '<div class="empty-state">没有找到符合条件的股票。</div>';
+    return;
+  }
+
+  feedback.innerHTML = results.slice(0, 20).map(function(r) {
+    var score = Math.round((r.match_score || 0) * 100);
+    var scoreColor = score >= 80 ? "var(--green)" : score >= 60 ? "var(--orange)" : "var(--muted)";
+    var conditions = (r.matched_conditions || []).slice(0, 4).join(", ");
+    return '<div class="ai-result-item">' +
+      '<div class="rank-badge">' + (r.rank || "?") + '</div>' +
+      '<div><strong>' + r.instrument_id + '</strong><br><span style="font-size:12px;color:var(--muted)">' + conditions + '</span></div>' +
+      '<div class="match-score" style="color:' + scoreColor + '">' + score + '% 匹配</div>' +
+      '<button class="ghost-button" type="button" data-view-stock="' + r.instrument_id + '">查看</button>' +
+    '</div>';
+  }).join("");
+}
+
 document.getElementById("refresh-download-jobs").addEventListener("click", async () => {
   await setActiveTab("downloads");
   await loadDownloadJobs();
@@ -4448,6 +5016,11 @@ document.getElementById("paper-order-form").addEventListener("submit", async (ev
   event.preventDefault();
   await setActiveTab("paper");
   await submitPaperOrder();
+});
+
+document.getElementById("futures-order-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await submitFuturesOrder(event);
 });
 
 document.getElementById("learning-quiz-form").addEventListener("submit", async (event) => {
@@ -4535,6 +5108,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   renderChartControls();
   renderCryptoChartControls();
   renderFuturesChartControls();
+  await loadFuturesTrading();
   renderPaperOrderTypeState();
   renderTabs();
   renderAuthState();

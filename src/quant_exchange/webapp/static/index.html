@@ -349,6 +349,27 @@
               </div>
             </div>
 
+            <!-- SW-14: AI Smart Screener (Natural Language Query) -->
+            <div class="ai-screener-panel">
+              <div class="section-head">
+                <div>
+                  <h3>AI 智能选股</h3>
+                  <p id="ai-screener-summary">用自然语言描述你的选股条件，AI 自动解析并执行筛选。</p>
+                </div>
+              </div>
+              <form id="ai-screener-form" class="ai-screener-form">
+                <label class="wide">
+                  <span>自然语言查询</span>
+                  <input id="ai-screener-query" name="query" type="text" placeholder="例如：RSI低于30的超卖股票，或高股息低PE的价值股，或放量突破的科技股" />
+                </label>
+                <div class="actions">
+                  <button type="submit" class="primary-button">AI 执行选股</button>
+                </div>
+              </form>
+              <div id="ai-screener-results" class="ai-screener-results empty-state">AI 筛选结果将显示在这里。</div>
+              <div id="ai-screener-conditions" class="ai-screener-conditions"></div>
+            </div>
+
             <form id="filters-form" class="filters-grid">
               <label class="wide">
                 <span>全局检索</span>
@@ -533,10 +554,22 @@
                     <div id="chart-range-buttons" class="chip-row"></div>
                     <div id="chart-mode-buttons" class="chip-row"></div>
                     <div id="chart-indicator-buttons" class="chip-row"></div>
+                    <button id="multicycle-toggle-btn" class="ghost-button" type="button" title="多周期联动">多周期</button>
                   </div>
                 </div>
                 <div id="kline-card" class="kline-card empty-state">
                   选择一只股票后，这里会展示历史日线 K 线图和区间统计。
+                </div>
+                <!-- CHART-03: Multi-cycle linkage panel -->
+                <div id="multicycle-panel" class="multicycle-panel" style="display:none;">
+                  <div class="section-head">
+                    <div>
+                      <h3>多周期联动</h3>
+                      <p id="multicycle-summary">同步展示多个时间周期的走势</p>
+                    </div>
+                    <button id="multicycle-close" class="ghost-button" type="button">关闭</button>
+                  </div>
+                  <div id="multicycle-charts" class="multicycle-grid"></div>
                 </div>
                 <div class="quick-trade-bar" id="quick-trade-bar">
                   <span id="quick-trade-symbol" class="quick-trade-symbol">未选中标的</span>
@@ -685,6 +718,72 @@
             </div>
             <div id="futures-kline-card" class="kline-card empty-state">
               选择一个期货合约后，这里会展示历史走势和区间统计。
+            </div>
+          </section>
+
+          <!-- FT-05: Futures Simulated Trading -->
+          <section class="panel">
+            <div class="section-head">
+              <div>
+                <h2>期货模拟交易</h2>
+                <p id="futures-trading-summary">用仿真账户验证期货下单、持仓和盈亏。</p>
+              </div>
+              <div class="head-actions">
+                <button id="futures-refresh-trading" class="ghost-button" type="button">刷新</button>
+              </div>
+            </div>
+            <div id="futures-trading-dashboard" class="futures-trading-dashboard"></div>
+            <div class="futures-trading-grid">
+              <section class="futures-card">
+                <div class="section-head">
+                  <div>
+                    <h3>下单面板</h3>
+                    <p>选择合约并发起模拟期货订单。</p>
+                  </div>
+                </div>
+                <form id="futures-order-form" class="futures-order-grid">
+                  <label class="wide">
+                    <span>当前合约</span>
+                    <div id="futures-current-contract" class="inline-badge empty-badge">点击左侧合约列表选择一个期货合约</div>
+                  </label>
+                  <label>
+                    <span>方向</span>
+                    <select id="futures-order-direction" name="direction">
+                      <option value="long">做多</option>
+                      <option value="short">做空</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>订单类型</span>
+                    <select id="futures-order-type" name="order_type">
+                      <option value="market">市价</option>
+                      <option value="limit">限价</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>数量（手）</span>
+                    <input id="futures-order-quantity" name="quantity" type="number" min="1" step="1" value="1" />
+                  </label>
+                  <label>
+                    <span>限价价格</span>
+                    <input id="futures-order-price" name="limit_price" type="number" min="0" step="0.01" placeholder="限价单时填写" />
+                  </label>
+                  <div class="actions">
+                    <button id="futures-submit-order" type="submit" class="primary-button">提交期货订单</button>
+                  </div>
+                </form>
+                <div id="futures-order-feedback" class="futures-feedback empty-badge">下单结果会显示在这里。</div>
+              </section>
+
+              <section class="futures-card">
+                <div class="section-head">
+                  <div>
+                    <h3>持仓信息</h3>
+                    <p>当前期货仿真账户的持仓和盈亏。</p>
+                  </div>
+                </div>
+                <div id="futures-positions-list" class="futures-positions-list empty-state">暂无持仓数据。</div>
+              </section>
             </div>
           </section>
         </section>

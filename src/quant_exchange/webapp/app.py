@@ -188,6 +188,17 @@ class StockScreenerWebApp:
         if path == "/api/stocks/count" and method == "GET":
             filters = self._parse_filters(environ)
             return self._json(start_response, self.platform.api.count_stocks(**filters))
+        # SW-14: AI Smart Screener
+        if path == "/api/screener/ai" and method == "POST":
+            payload = self._read_json(environ)
+            query = payload.get("query", "")
+            return self._json(start_response, self.platform.api.smart_screen_from_query(query))
+        if path == "/api/screener/results" and method == "GET":
+            query = parse_qs(environ.get("QUERY_STRING", ""))
+            screener_id = query.get("screener_id", [""])[0]
+            return self._json(start_response, self.platform.api.smart_screen_results(screener_id))
+        if path == "/api/screener/factors" and method == "GET":
+            return self._json(start_response, self.platform.api.smart_screen_factors())
         if path == "/api/stocks/universe" and method == "GET":
             query = parse_qs(environ.get("QUERY_STRING", ""))
             featured_limit = int(query.get("featured_limit", ["24"])[0])

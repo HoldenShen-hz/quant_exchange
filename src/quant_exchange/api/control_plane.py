@@ -204,6 +204,56 @@ class ControlPlaneAPI:
 
         return self._ok({"count": self.platform.stocks.count_stocks(filters)})
 
+    # ─── SW-14: AI Smart Screener ─────────────────────────────────────────────
+
+    def smart_screen_from_query(self, query: str, user_id: str = "web_user") -> dict:
+        """Parse natural language query and run AI smart screener (SW-14)."""
+        try:
+            results = self.platform.smart_screener.screen_from_query(user_id, query)
+            parsed = self.platform.smart_screener.parse_natural_query(query)
+            return self._ok({
+                "results": [self._screener_result(r) for r in results],
+                "parsed_conditions": [
+                    {"factor": c.factor, "operator": c.operator.value, "value": c.value}
+                    for c in parsed.conditions
+                ],
+                "pattern_filters": [p.value for p in parsed.pattern_filters],
+                "result_count": len(results),
+            })
+        except Exception as exc:
+            return self._error("SMART_SCREENER_ERROR", f"Smart screener failed: {exc}")
+
+    def smart_screen_results(self, screener_id: str) -> dict:
+        """Get last results from a smart screener run (SW-14)."""
+        try:
+            results = self.platform.smart_screener.get_last_results(screener_id)
+            return self._ok({
+                "results": [self._screener_result(r) for r in results],
+                "result_count": len(results),
+            })
+        except Exception as exc:
+            return self._error("SMART_SCREENER_ERROR", f"Failed to get results: {exc}")
+
+    def smart_screen_factors(self) -> dict:
+        """Return available technical and fundamental factors (SW-14)."""
+        from quant_exchange.enhanced.smart_screener import TECHNICAL_FACTORS, FUNDAMENTAL_FACTORS
+        return self._ok({
+            "technical": TECHNICAL_FACTORS,
+            "fundamental": FUNDAMENTAL_FACTORS,
+        })
+
+    def _screener_result(self, r) -> dict:
+        """Serialize a ScreeningResult."""
+        return {
+            "instrument_id": r.instrument_id,
+            "screener_id": r.screener_id,
+            "match_score": r.match_score,
+            "matched_conditions": list(r.matched_conditions),
+            "factor_values": r.factor_values,
+            "rank": r.rank,
+            "created_at": r.created_at,
+        }
+
     def stock_universe_summary(self, featured_limit: int = 24) -> dict:
         """Return a compact summary of the full stock universe."""
 

@@ -616,6 +616,42 @@ body::before {
   gap: 14px;
 }
 
+/* ── CHART-03: Multi-cycle Linkage ─────────────────────────── */
+.multicycle-panel {
+  margin-top: 14px;
+  padding: 14px;
+  border-radius: 18px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--line);
+}
+
+.multicycle-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.multicycle-chart-item {
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+}
+
+.multicycle-chart-item .mini-chart-header {
+  padding: 6px 12px;
+  background: rgba(255,255,255,0.03);
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--muted);
+  display: flex;
+  justify-content: space-between;
+}
+
+.multicycle-chart-item .mini-chart-header strong {
+  color: var(--accent);
+}
+
 .kline-summary {
   display: flex;
   flex-wrap: wrap;
@@ -646,6 +682,91 @@ body::before {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
   margin-bottom: 16px;
+}
+
+/* ── SW-14: AI Smart Screener ────────────────────────────── */
+.ai-screener-panel {
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--line);
+  margin-bottom: 16px;
+}
+
+.ai-screener-form {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  margin-top: 12px;
+  align-items: end;
+}
+
+.ai-screener-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ai-screener-form label span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.ai-screener-form .actions {
+  align-self: end;
+  padding-bottom: 2px;
+}
+
+.ai-screener-results {
+  margin-top: 14px;
+  min-height: 80px;
+  display: grid;
+  gap: 10px;
+}
+
+.ai-screener-conditions {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ai-condition-tag {
+  padding: 4px 10px;
+  border-radius: 12px;
+  background: rgba(33,150,243,0.15);
+  border: 1px solid rgba(33,150,243,0.3);
+  font-size: 12px;
+  color: var(--blue);
+}
+
+.ai-result-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--line);
+  align-items: center;
+}
+
+.ai-result-item .rank-badge {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--blue);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.ai-result-item .match-score {
+  font-size: 12px;
+  color: var(--muted);
 }
 
 .filters-grid label {
@@ -1324,6 +1445,82 @@ tbody tr.is-active {
 .paper-error-text {
   color: var(--red);
 }
+
+/* ── Futures Trading (FT-05) ──────────────────────────────── */
+.futures-trading-dashboard {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.futures-card {
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--line);
+}
+
+.futures-trading-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.futures-order-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.futures-order-grid label {
+  display: grid;
+  gap: 6px;
+}
+
+.futures-order-grid label span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.futures-order-grid .wide,
+.futures-order-grid .actions {
+  grid-column: 1 / -1;
+}
+
+.futures-feedback {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  padding: 10px 14px;
+  border-radius: 12px;
+  font-size: 13px;
+  margin-top: 8px;
+  background: rgba(255,255,255,0.04);
+}
+
+.futures-positions-list {
+  margin-top: 10px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.futures-position-item {
+  display: grid;
+  grid-template-columns: 1fr auto auto auto;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+  align-items: center;
+}
+
+.futures-position-item:last-child {
+  border-bottom: none;
+}
+
+.futures-position-item .pos-direction.long { color: var(--green); }
+.futures-position-item .pos-direction.short { color: var(--red); }
 
 .paper-list {
   display: grid;
