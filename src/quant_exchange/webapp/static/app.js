@@ -5365,7 +5365,9 @@ function connectMarketWebSocket() {
     _marketWs.close();
   }
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  const wsUrl = `${protocol}//${location.host}/ws/market`;
+  // WebSocket server runs on port 8081, separate from HTTP server on 8080
+  const wsHost = location.hostname + ":8081";
+  const wsUrl = `${protocol}//${wsHost}/ws/market`;
   _marketWs = new WebSocket(wsUrl);
 
   _marketWs.onopen = () => {
