@@ -10,6 +10,7 @@ authors = [
 ]
 dependencies = [
   "baostock>=0.8.9",
+  "pyyaml>=6.0",
 ]
 
 [tool.unittest]
